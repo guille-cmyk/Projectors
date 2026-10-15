@@ -1,13 +1,36 @@
 # Projector Add-on for Blender
-Simple projector creation and modification for [Blender](https://www.blender.org/).
+Simple projector creation and modification for [Blender](https://www.blender.org/) 4.2+ LTS.
 
 ![Projector Add-on for Blender title image](/.github/gifs/title.jpg)
 
-## What this Add-on can do for you
-* Easy creation and modification of physically-based projectors.
-* Real-world projector settings like [throw ratio](https://en.wikipedia.org/wiki/Throw_(projector)), [resolution](https://en.wikipedia.org/wiki/Computer_display_standard) and [lens shift](https://www.projectorcentral.com/Understanding-Lens-Offset-and-Lens-Shift.htm).
-* Project test textures or your own content like images and videos.
-* Preview the projections in Cycles render mode (Eevee will be supported when the needed functionality is implemented).
+## Features
+
+### 1. Physically-Accurate 3D Projector & Rigging System
+* **Procedural 3D Model Generation**: High-detail physical chassis with cooling louvers, top control panel with buttons and status LEDs (Power, Temp, Lamp), knurled zoom and focus controls, and rear I/O plate (HDMI, USB, Audio, RS-232, IEC AC power inlet, Kensington lock slot).
+* **Optical Origin Exit Pupil Alignment**: The projection frustum and spot beam originate exactly at the physical exit pupil of the front lens element at local `(0, 0, 0)`. The lens barrel extends backward into the chassis, ensuring zero internal self-shadowing and 100% optical alignment with Blender cameras and Cycles projection rays.
+* **Underside Metric Mounting Points**: 4 M4/M6 threaded brass inserts positioned according to standard manufacturer pitch circle diameters (PCD).
+* **Modular Rigging System**:
+  * **Tabletop (`NONE`)**: 4 adjustable knurled rubber leveling feet with threaded height-adjustment studs.
+  * **Ceiling Mount (`CEILING`)**: Slotted articulated steel spider arms, central gimbal hub with pitch/roll tilt controls, customizable 1.5" NPT extension drop column (`mount_pole_length`), and structural ceiling flange plate with anchor bolt slots. Supports inverted mounting (upside-down) matching standard AV installation.
+  * **Theatrical Truss Clamp (`TRUSS`)**: Heavy-duty 50mm (2") Half-Coupler (cheeseborough) clamp with hinge pin, ergonomic T-bar wing handle, and stainless steel aircraft safety cable with screw-lock carabiner.
+* **Parametric Auto-Sizing**: Chassis dimensions (Width, Height, Depth, Lens Offset) automatically adjust when selecting a model from the ProjectorCentral database.
+
+### 2. ProjectorCentral Integration & Model Database
+* **Built-in Offline Database**: Pre-populated specifications for popular production models from leading brands (BenQ, Epson, Optoma, Panasonic, Sony, Barco, Christie, ViewSonic).
+* **On-the-Fly Scraper**: Download specifications directly from [ProjectorCentral.com](https://www.projectorcentral.com) by entering any model name or URL.
+* **One-Click Configuration**: Automatically applies Lumens, Throw Ratio, Focus Distance range, Aspect Ratio, Resolution, Lens Shift limits, and physical dimensions.
+
+### 3. Optimal Depth Luminosity & Topological Heatmap
+* **Saturated Zero-Gradient Heatmap**: 3 distinctive, high-contrast distance zones with zero gradient stepped transitions:
+  * **Yellow**: $< d_{\text{min}}$ (Too close / over-illuminated)
+  * **Green**: $d_{\text{opt}}$ (Optimal focus & screen luminance)
+  * **Red**: $> d_{\text{max}}$ (Under-illuminated / beyond focused throw)
+* **Elevation Contour Isolines**: High-visibility metric elevation contour lines across the projected surface.
+* **FOV Frustum Masking**: Clamps projection strictly to the projector's rectangular aspect ratio frame, preventing spotlight hemisphere light bleed.
+* **Distance Dimming Compensation**: Cancels physical $1/d^2$ attenuation in Cycles to keep surfaces at maximum distance brightly visible for surveying and mapping.
+* **Photometric Lux Readout**: Real-time calculated illuminance in Lux and throw area dimensions at optimal focus distance.
+
+---
 
 ## Projectors Add-on in Action
 
@@ -27,20 +50,17 @@ Load your own images or videos and set custom resolutions to match your projecti
 Quickly assign random colors to distinguish multiple projectors in your scene.
 ![Random Color](/.github/gifs/random_color.gif)
 
-## Note
-* works with Blender 2.8 and up
+---
 
-## Wiki
-* A growing [wiki](https://github.com/Ocupe/Projectors/wiki) to help users with this add-on. If you have problems or feel that something is missing, please feel free to request more content.
+## Compatibility
+* Works with Blender 4.2+ LTS (Cycles Render Engine recommended for physically-based depth ray tracing).
 
 ## Installation
-* Download the repo by clicking the green **Code** button and then **Download ZIP** (don't unpack the file on your computer).
-* Open Blender.
-* Go to the User Preferences in the Addon tab.
-* Click Install from File and choose the zip file you downloaded.
-* Activate the add-on by clicking on the checkbox.
+1. Download the repository as a ZIP file.
+2. In Blender, navigate to **Edit > Preferences > Add-ons**.
+3. Click the drop-down menu in the top right, select **Install from Disk...**, and select the `.zip` file.
+4. Enable the **Projector** extension.
+5. In the 3D Viewport, press **N** to open the sidebar and navigate to the **Projector** tab.
 
-## Missing something?
-I'm interested and open to suggestions. Let me know how you use the add-on and how it could improve. Open an issue or message me.
-
-P.S. Germans like to call a projector, a beamer.
+## License
+GPLv3 License - see [LICENSE](LICENSE) for details.

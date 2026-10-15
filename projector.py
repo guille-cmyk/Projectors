@@ -1,13 +1,15 @@
 import logging
 import math
 import os
-
 from enum import Enum
+from pathlib import Path
+
 import bpy
 from bpy.types import Operator
 
 from .helper import (ADDON_ID, auto_offset,
                      get_projectors, get_projector, random_color)
+from . import projector_central
 
 logging.basicConfig(
     format='[Projectors Addon]: %(name)s - %(levelname)s - %(message)s')
@@ -17,6 +19,7 @@ log = logging.getLogger(name=__file__)
 class Textures(Enum):
     CHECKER = 'checker_texture'
     COLOR_GRID = 'color_grid_texture'
+    OPTIMAL_DEPTH = 'optimal_depth_luminosity'
     CUSTOM_TEXTURE = 'custom_texture'
 
 
@@ -25,24 +28,28 @@ RESOLUTIONS = [
     ('1280x800', 'WXGA (1280x800) 16:10', '', 1),
     ('1440x900', 'WXGA+ (1440x900) 16:10', '', 2),
     ('1920x1200', 'WUXGA (1920x1200) 16:10', '', 3),
+    ('3840x2400', 'WQUXGA (3840x2400) 16:10', '', 4),
     # 16:9 aspect ratio
-    ('1280x720', '720p (1280x720) 16:9', '', 4),
-    ('1920x1080', '1080p (1920x1080) 16:9', '', 5),
-    ('3840x2160', '4K Ultra HD (3840x2160) 16:9', '', 6),
+    ('1280x720', '720p (1280x720) 16:9', '', 5),
+    ('1920x1080', '1080p (1920x1080) 16:9', '', 6),
+    ('3840x2160', '4K Ultra HD (3840x2160) 16:9', '', 7),
     # 4:3 aspect ratio
-    ('800x600', 'SVGA (800x600) 4:3', '', 7),
-    ('1024x768', 'XGA (1024x768) 4:3', '', 8),
-    ('1400x1050', 'SXGA+ (1400x1050) 4:3', '', 9),
-    ('1600x1200', 'UXGA (1600x1200) 4:3', '', 10),
+    ('800x600', 'SVGA (800x600) 4:3', '', 8),
+    ('1024x768', 'XGA (1024x768) 4:3', '', 9),
+    ('1400x1050', 'SXGA+ (1400x1050) 4:3', '', 10),
+    ('1600x1200', 'UXGA (1600x1200) 4:3', '', 11),
     # 17:9 aspect ratio
-    ('4096x2160', 'Native 4K (4096x2160) 17:9', '', 11),
+    ('4096x2160', 'Native 4K (4096x2160) 17:9', '', 12),
     # 1:1 aspect ratio
-    ('1000x1000', 'Square (1000x1000) 1:1', '', 12)
+    ('1000x1000', 'Square (1000x1000) 1:1', '', 13)
 ]
 
-PROJECTED_OUTPUTS = [(Textures.CHECKER.value, 'Checker', '', 1),
-                     (Textures.COLOR_GRID.value, 'Color Grid', '', 2),
-                     (Textures.CUSTOM_TEXTURE.value, 'Custom Texture', '', 3)]
+PROJECTED_OUTPUTS = [
+    (Textures.CHECKER.value, 'Checker', 'Generated checkerboard pattern', 1),
+    (Textures.COLOR_GRID.value, 'Color Grid', 'Generated resolution color grid', 2),
+    (Textures.OPTIMAL_DEPTH.value, 'Optimal Depth Luminosity', 'Depth & luminance calibration texture and heatmap', 3),
+    (Textures.CUSTOM_TEXTURE.value, 'Custom Texture', 'User custom image or video file', 4)
+]
 
 
 class PROJECTOR_OT_change_color_randomly(Operator):
@@ -64,6 +71,115 @@ class PROJECTOR_OT_change_color_randomly(Operator):
         return {'FINISHED'}
 
 
+def generate_optimal_depth_image_file(out_path: Path, width: int = 1920, height: int = 1080) -> None:
+    """Generate high-precision transparent optical test chart overlay on disk."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        log.warning("PIL not found; skipping image file generation.")
+        return
+
+    # Fully transparent background so the saturated topological heatmap shines through with zero dimming
+    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # 1. Subtle semi-transparent grid
+    grid_size = 60
+    for x in range(0, width, grid_size):
+        draw.line([(x, 0), (x, height)], fill=(255, 255, 255, 40), width=1)
+    for y in range(0, height, grid_size):
+        draw.line([(0, y), (width, y)], fill=(255, 255, 255, 40), width=1)
+
+    # Major grid lines every 240px
+    for x in range(0, width, 240):
+        draw.line([(x, 0), (x, height)], fill=(255, 255, 255, 90), width=2)
+    for y in range(0, height, 240):
+        draw.line([(0, y), (width, y)], fill=(255, 255, 255, 90), width=2)
+
+    cx, cy = width // 2, height // 2
+
+    # Center crosshairs
+    draw.line([(cx, 0), (cx, height)], fill=(255, 255, 255, 230), width=2)
+    draw.line([(0, cy), (width, cy)], fill=(255, 255, 255, 230), width=2)
+
+    # Concentric focus zone rings in center
+    for r in [50, 100, 160, 240, 340, 460]:
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 255, 255, 200), width=2)
+    draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=(255, 255, 255, 255))
+
+    # Corner focus targets
+    corners = [(140, 140), (width - 140, 140), (140, height - 140), (width - 140, height - 140)]
+    for kx, ky in corners:
+        for r in [30, 60, 90]:
+            draw.ellipse([kx - r, ky - r, kx + r, ky + r], outline=(255, 255, 255, 220), width=2)
+        draw.line([(kx - 100, ky), (kx + 100, ky)], fill=(255, 255, 255, 220), width=1)
+        draw.line([(kx, ky - 100), (kx, ky + 100)], fill=(255, 255, 255, 220), width=1)
+
+    # Rec.709 Color Primaries & Secondaries Bar (Top)
+    top_bar_y = 50
+    bar_h = 32
+    colors_rec709 = [
+        (255, 255, 255),  # 100% White
+        (255, 255, 0),    # Yellow
+        (0, 255, 255),    # Cyan
+        (0, 255, 0),      # Green
+        (255, 0, 255),    # Magenta
+        (255, 0, 0),      # Red
+        (0, 0, 255),      # Blue
+        (0, 0, 0),        # Black
+    ]
+    bar_w = (width - 400) // len(colors_rec709)
+    for i, col in enumerate(colors_rec709):
+        bx = 200 + i * bar_w
+        draw.rectangle([bx, top_bar_y, bx + bar_w, top_bar_y + bar_h], fill=col + (230,), outline=(255, 255, 255, 200))
+
+    # 3-Zone Distance & Luminosity Reference Bar (Bottom)
+    ramp_y = height - 130
+    ramp_h = 35
+    total_bar_w = width - 400
+    zone_w = total_bar_w // 3
+    # Zone 1: Yellow (Too Close: < Min Distance)
+    draw.rectangle([200, ramp_y, 200 + zone_w, ramp_y + ramp_h], fill=(255, 230, 0, 230), outline=(255, 255, 255, 200))
+    # Zone 2: Green (Optimal Sweet Spot)
+    draw.rectangle([200 + zone_w, ramp_y, 200 + 2 * zone_w, ramp_y + ramp_h], fill=(0, 255, 30, 230), outline=(255, 255, 255, 200))
+    # Zone 3: Red (Not Good / Too Far: > Max Distance)
+    draw.rectangle([200 + 2 * zone_w, ramp_y, 200 + total_bar_w, ramp_y + ramp_h], fill=(255, 20, 20, 230), outline=(255, 255, 255, 200))
+
+    # Safe frame borders
+    draw.rectangle([30, 30, width - 30, height - 30], outline=(255, 255, 255, 220), width=2)
+    draw.rectangle([70, 70, width - 70, height - 70], outline=(255, 255, 255, 140), width=1)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(out_path))
+    log.debug(f'Optimal depth texture generated at {out_path}')
+
+
+
+def create_optimal_depth_texture(img_name: str = '_proj.tex.optimal_depth'):
+    """Load or generate the optimal depth luminosity test chart image."""
+    asset_dir = Path(__file__).resolve().parent / 'assets'
+    asset_path = asset_dir / 'optimal_depth_pattern.png'
+
+    if not asset_path.exists():
+        generate_optimal_depth_image_file(asset_path)
+
+    if asset_path.exists():
+        try:
+            img = bpy.data.images.load(str(asset_path))
+            img.name = img_name
+            img.use_fake_user = True
+            return img
+        except Exception as e:
+            log.warning(f"Could not load optimal depth image file: {e}")
+
+    # Fallback to generated image
+    if not bpy.data.images.get(img_name):
+        img = bpy.data.images.new(name=img_name, width=1920, height=1080)
+        img.use_fake_user = True
+        return img
+    return bpy.data.images[img_name]
+
+
 def create_projector_textures():
     """ This function checks if the needed images exist and if not creates them. """
     name_template = '_proj.tex.{}'
@@ -82,6 +198,348 @@ def create_projector_textures():
 
         bpy.data.images[img_name].use_fake_user = True
 
+    # Optimal Depth Luminosity Texture
+    depth_tex_name = '_proj.tex.optimal_depth'
+    if not bpy.data.images.get(depth_tex_name):
+        create_optimal_depth_texture(depth_tex_name)
+    else:
+        bpy.data.images[depth_tex_name].use_fake_user = True
+
+
+def create_depth_luminosity_node_group():
+    """
+    Build shader node group for Optimal Depth Luminosity.
+    Implements a hyper-saturated, non-dimming topological depth heatmap
+    with 3 distinctive zones (Yellow=Too Close, Green=Optimal, Red=Not Good),
+    elevation contour isolines, FOV rectangular frustum clipping,
+    and distance luminosity compensation.
+    """
+    group_name = '_Projectors-Addon_DepthLuminosity'
+    if group_name in bpy.data.node_groups:
+        existing = bpy.data.node_groups[group_name]
+        has_new_sockets = False
+        if bpy.app.version >= (4, 0):
+            has_new_sockets = 'Clip to FOV' in existing.interface.items_tree
+        else:
+            has_new_sockets = 'Clip to FOV' in existing.inputs
+
+        cr_node = existing.nodes.get('Color Ramp')
+        is_constant = cr_node and cr_node.color_ramp.interpolation == 'CONSTANT' and len(cr_node.color_ramp.elements) == 3
+
+        if has_new_sockets and is_constant:
+            return existing
+        else:
+            bpy.data.node_groups.remove(existing)
+
+    node_group = bpy.data.node_groups.new(group_name, 'ShaderNodeTree')
+
+    # Interface sockets
+    if bpy.app.version >= (4, 0):
+        node_group.interface.new_socket('Texture Vector', in_out='INPUT', socket_type='NodeSocketVector')
+        node_group.interface.new_socket('Min Distance', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Optimal Distance', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Max Distance', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Mode', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Contour Step', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Contour Intensity', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Constant Brightness', in_out='INPUT', socket_type='NodeSocketFloat')
+        node_group.interface.new_socket('Clip to FOV', in_out='INPUT', socket_type='NodeSocketFloat')
+
+        node_group.interface.new_socket('Color', in_out='OUTPUT', socket_type='NodeSocketColor')
+    else:
+        node_group.inputs.new('NodeSocketVector', 'Texture Vector')
+        node_group.inputs.new('NodeSocketFloat', 'Min Distance')
+        node_group.inputs.new('NodeSocketFloat', 'Optimal Distance')
+        node_group.inputs.new('NodeSocketFloat', 'Max Distance')
+        node_group.inputs.new('NodeSocketFloat', 'Mode')
+        node_group.inputs.new('NodeSocketFloat', 'Contour Step')
+        node_group.inputs.new('NodeSocketFloat', 'Contour Intensity')
+        node_group.inputs.new('NodeSocketFloat', 'Constant Brightness')
+        node_group.inputs.new('NodeSocketFloat', 'Clip to FOV')
+
+        node_group.outputs.new('NodeSocketColor', 'Color')
+
+    nodes = node_group.nodes
+    links = node_group.links
+    auto_pos = auto_offset()
+
+    group_input = nodes.new('NodeGroupInput')
+    group_input.location = auto_pos(150)
+
+    # Physical distance along ray from spotlight to hit surface
+    light_path = nodes.new('ShaderNodeLightPath')
+    light_path.location = auto_pos(0, y=-250)
+
+    # 1. Piecewise Distance Mapping:
+    # Segment 1: [Min Distance, Optimal Distance] -> [0.0, 0.5] (clamped)
+    map_1 = nodes.new('ShaderNodeMapRange')
+    map_1.clamp = True
+    map_1.inputs['To Min'].default_value = 0.0
+    map_1.inputs['To Max'].default_value = 0.5
+    map_1.location = auto_pos(180, y=-200)
+
+    # Segment 2: [Optimal Distance, Max Distance] -> [0.5, 1.0] (clamped)
+    map_2 = nodes.new('ShaderNodeMapRange')
+    map_2.clamp = True
+    map_2.inputs['To Min'].default_value = 0.5
+    map_2.inputs['To Max'].default_value = 1.0
+    map_2.location = auto_pos(180, y=-380)
+
+    # Combine segments: fac = map_1 + map_2 - 0.5
+    add_fac = nodes.new('ShaderNodeMath')
+    add_fac.operation = 'ADD'
+    add_fac.location = auto_pos(180, y=-250)
+
+    sub_fac = nodes.new('ShaderNodeMath')
+    sub_fac.operation = 'SUBTRACT'
+    sub_fac.inputs[1].default_value = 0.5
+    sub_fac.location = auto_pos(180, y=-250)
+
+    # 2. Three Distinctive Zones with ZERO GRADIENT (Constant Stepped)
+    color_ramp = nodes.new('ShaderNodeValToRGB')
+    color_ramp.location = auto_pos(250, y=-250)
+    ramp = color_ramp.color_ramp
+    ramp.interpolation = 'CONSTANT'  # Zero gradient between zones!
+    ramp.elements[0].position = 0.0
+    ramp.elements[0].color = (1.0, 0.95, 0.0, 1.0)  # Pure Saturated Yellow (< min dist, too close)
+    ramp.elements[1].position = 0.70
+    ramp.elements[1].color = (1.0, 0.0, 0.0, 1.0)  # Pure Saturated Red (> max dist, not good)
+    e_green = ramp.elements.new(0.40)
+    e_green.color = (0.0, 1.0, 0.05, 1.0)  # Pure Neon Green (optimal sweet spot)
+
+    # 3. Topological Contour Isolines (Distance mod contour step)
+    div_contour = nodes.new('ShaderNodeMath')
+    div_contour.operation = 'DIVIDE'
+    div_contour.location = auto_pos(180, y=-450)
+
+    mod_contour = nodes.new('ShaderNodeMath')
+    mod_contour.operation = 'MODULO'
+    mod_contour.inputs[1].default_value = 1.0
+    mod_contour.location = auto_pos(180, y=-450)
+
+    cr_contour = nodes.new('ShaderNodeValToRGB')
+    cr_contour.color_ramp.interpolation = 'CONSTANT'
+    cr_contour.color_ramp.elements[0].position = 0.0
+    cr_contour.color_ramp.elements[0].color = (1.0, 1.0, 1.0, 1.0)
+    e_c1 = cr_contour.color_ramp.elements.new(0.88)
+    e_c1.color = (0.12, 0.12, 0.12, 1.0)  # Sharp dark contour band
+    e_c2 = cr_contour.color_ramp.elements.new(0.94)
+    e_c2.color = (1.0, 1.0, 1.0, 1.0)
+    cr_contour.location = auto_pos(200, y=-450)
+
+    # Modulate Heatmap with Topological Contours
+    mix_topo = nodes.new('ShaderNodeMixRGB')
+    mix_topo.blend_type = 'MULTIPLY'
+    mix_topo.location = auto_pos(250, y=-250)
+
+    # 4. Distance Luminosity Falloff Compensation ("avoid dimming and keep projecting till maximum distance")
+    div_d = nodes.new('ShaderNodeMath')
+    div_d.operation = 'DIVIDE'
+    div_d.location = auto_pos(180, y=-600)
+
+    sq_d = nodes.new('ShaderNodeMath')
+    sq_d.operation = 'MULTIPLY'
+    sq_d.location = auto_pos(180, y=-600)
+
+    clamp_sq = nodes.new('ShaderNodeMath')
+    clamp_sq.operation = 'MINIMUM'
+    clamp_sq.inputs[1].default_value = 25.0
+    clamp_sq.location = auto_pos(180, y=-600)
+
+    sub_one = nodes.new('ShaderNodeMath')
+    sub_one.operation = 'SUBTRACT'
+    sub_one.inputs[1].default_value = 1.0
+    sub_one.location = auto_pos(180, y=-600)
+
+    mul_cb = nodes.new('ShaderNodeMath')
+    mul_cb.operation = 'MULTIPLY'
+    mul_cb.location = auto_pos(180, y=-600)
+
+    final_boost = nodes.new('ShaderNodeMath')
+    final_boost.operation = 'ADD'
+    final_boost.inputs[1].default_value = 1.0
+    final_boost.location = auto_pos(180, y=-600)
+
+    comb_boost = nodes.new('ShaderNodeCombineXYZ')
+    comb_boost.location = auto_pos(180, y=-600)
+
+    mul_heat = nodes.new('ShaderNodeMixRGB')
+    mul_heat.blend_type = 'MULTIPLY'
+    mul_heat.inputs['Fac'].default_value = 1.0
+    mul_heat.location = auto_pos(220, y=-250)
+
+    # 5. Calibration Overlay Texture
+    if not bpy.data.images.get('_proj.tex.optimal_depth'):
+        create_optimal_depth_texture('_proj.tex.optimal_depth')
+    tex_img = nodes.new('ShaderNodeTexImage')
+    if bpy.data.images.get('_proj.tex.optimal_depth'):
+        tex_img.image = bpy.data.images['_proj.tex.optimal_depth']
+    tex_img.extension = 'CLIP'
+    tex_img.location = auto_pos(0, y=200)
+
+    # 6. Combined Mode: Alpha-blended overlay (Heatmap base + crisp line art, NO DIMMING)
+    mix_combined = nodes.new('ShaderNodeMixRGB')
+    mix_combined.blend_type = 'MIX'
+    mix_combined.location = auto_pos(250, y=100)
+
+    # 7. Mode Switching: 0: Combined, 1: Heatmap, 2: Pattern
+    cmp_heat = nodes.new('ShaderNodeMath')
+    cmp_heat.operation = 'COMPARE'
+    cmp_heat.inputs[1].default_value = 1.0
+    cmp_heat.inputs[2].default_value = 0.1
+    cmp_heat.location = auto_pos(200, y=-100)
+
+    mix_heatmap = nodes.new('ShaderNodeMixRGB')
+    mix_heatmap.blend_type = 'MIX'
+    mix_heatmap.location = auto_pos(200, y=100)
+
+    cmp_pattern = nodes.new('ShaderNodeMath')
+    cmp_pattern.operation = 'COMPARE'
+    cmp_pattern.inputs[1].default_value = 2.0
+    cmp_pattern.inputs[2].default_value = 0.1
+    cmp_pattern.location = auto_pos(200, y=-100)
+
+    mix_pattern = nodes.new('ShaderNodeMixRGB')
+    mix_pattern.blend_type = 'MIX'
+    mix_pattern.location = auto_pos(200, y=100)
+
+    # 8. Rectangular Projector FOV Masking
+    sep_uv = nodes.new('ShaderNodeSeparateXYZ')
+    sep_uv.location = auto_pos(180, y=400)
+
+    sub_u = nodes.new('ShaderNodeMath')
+    sub_u.operation = 'SUBTRACT'
+    sub_u.inputs[1].default_value = 0.5
+    sub_u.location = auto_pos(180, y=450)
+
+    abs_u = nodes.new('ShaderNodeMath')
+    abs_u.operation = 'ABSOLUTE'
+    abs_u.location = auto_pos(180, y=450)
+
+    sub_v = nodes.new('ShaderNodeMath')
+    sub_v.operation = 'SUBTRACT'
+    sub_v.inputs[1].default_value = 0.5
+    sub_v.location = auto_pos(180, y=350)
+
+    abs_v = nodes.new('ShaderNodeMath')
+    abs_v.operation = 'ABSOLUTE'
+    abs_v.location = auto_pos(180, y=350)
+
+    max_uv = nodes.new('ShaderNodeMath')
+    max_uv.operation = 'MAXIMUM'
+    max_uv.location = auto_pos(180, y=400)
+
+    cmp_fov = nodes.new('ShaderNodeMath')
+    cmp_fov.operation = 'LESS_THAN'
+    cmp_fov.inputs[1].default_value = 0.5001
+    cmp_fov.location = auto_pos(180, y=400)
+
+    sub_clip = nodes.new('ShaderNodeMath')
+    sub_clip.operation = 'SUBTRACT'
+    sub_clip.inputs[0].default_value = 1.0
+    sub_clip.location = auto_pos(180, y=300)
+
+    add_fov = nodes.new('ShaderNodeMath')
+    add_fov.operation = 'ADD'
+    add_fov.location = auto_pos(180, y=350)
+
+    clamp_fov = nodes.new('ShaderNodeMath')
+    clamp_fov.operation = 'MINIMUM'
+    clamp_fov.inputs[1].default_value = 1.0
+    clamp_fov.location = auto_pos(180, y=350)
+
+    mix_fov = nodes.new('ShaderNodeMixRGB')
+    mix_fov.blend_type = 'MIX'
+    mix_fov.inputs['Color1'].default_value = (0.0, 0.0, 0.0, 0.0)  # Outside FOV: 0 light!
+    mix_fov.location = auto_pos(250, y=100)
+
+    group_output = nodes.new('NodeGroupOutput')
+    group_output.location = auto_pos(200)
+
+    # --- WIRING ---
+    # Distance mapping
+    links.new(light_path.outputs['Ray Length'], map_1.inputs['Value'])
+    links.new(group_input.outputs['Min Distance'], map_1.inputs['From Min'])
+    links.new(group_input.outputs['Optimal Distance'], map_1.inputs['From Max'])
+
+    links.new(light_path.outputs['Ray Length'], map_2.inputs['Value'])
+    links.new(group_input.outputs['Optimal Distance'], map_2.inputs['From Min'])
+    links.new(group_input.outputs['Max Distance'], map_2.inputs['From Max'])
+
+    links.new(map_1.outputs['Result'], add_fac.inputs[0])
+    links.new(map_2.outputs['Result'], add_fac.inputs[1])
+    links.new(add_fac.outputs[0], sub_fac.inputs[0])
+    links.new(sub_fac.outputs[0], color_ramp.inputs['Fac'])
+
+    # Contour lines wiring
+    links.new(light_path.outputs['Ray Length'], div_contour.inputs[0])
+    links.new(group_input.outputs['Contour Step'], div_contour.inputs[1])
+    links.new(div_contour.outputs[0], mod_contour.inputs[0])
+    links.new(mod_contour.outputs[0], cr_contour.inputs['Fac'])
+
+    links.new(group_input.outputs['Contour Intensity'], mix_topo.inputs['Fac'])
+    links.new(color_ramp.outputs['Color'], mix_topo.inputs['Color1'])
+    links.new(cr_contour.outputs['Color'], mix_topo.inputs['Color2'])
+
+    # Distance falloff compensation
+    links.new(light_path.outputs['Ray Length'], div_d.inputs[0])
+    links.new(group_input.outputs['Optimal Distance'], div_d.inputs[1])
+    links.new(div_d.outputs[0], sq_d.inputs[0])
+    links.new(div_d.outputs[0], sq_d.inputs[1])
+    links.new(sq_d.outputs[0], clamp_sq.inputs[0])
+    links.new(clamp_sq.outputs[0], sub_one.inputs[0])
+    links.new(group_input.outputs['Constant Brightness'], mul_cb.inputs[0])
+    links.new(sub_one.outputs[0], mul_cb.inputs[1])
+    links.new(mul_cb.outputs[0], final_boost.inputs[0])
+    links.new(final_boost.outputs[0], comb_boost.inputs['X'])
+    links.new(final_boost.outputs[0], comb_boost.inputs['Y'])
+    links.new(final_boost.outputs[0], comb_boost.inputs['Z'])
+    links.new(mix_topo.outputs['Color'], mul_heat.inputs['Color1'])
+    links.new(comb_boost.outputs['Vector'], mul_heat.inputs['Color2'])
+
+    # Texture Vector
+    links.new(group_input.outputs['Texture Vector'], tex_img.inputs['Vector'])
+
+    # Combined = Alpha-blend over vibrant topological heatmap
+    links.new(tex_img.outputs['Alpha'], mix_combined.inputs['Fac'])
+    links.new(mul_heat.outputs['Color'], mix_combined.inputs['Color1'])
+    links.new(tex_img.outputs['Color'], mix_combined.inputs['Color2'])
+
+    # Mode 1: Heatmap
+    links.new(group_input.outputs['Mode'], cmp_heat.inputs[0])
+    links.new(cmp_heat.outputs['Value'], mix_heatmap.inputs['Fac'])
+    links.new(mix_combined.outputs['Color'], mix_heatmap.inputs['Color1'])
+    links.new(mul_heat.outputs['Color'], mix_heatmap.inputs['Color2'])
+
+    # Mode 2: Pattern
+    links.new(group_input.outputs['Mode'], cmp_pattern.inputs[0])
+    links.new(cmp_pattern.outputs['Value'], mix_pattern.inputs['Fac'])
+    links.new(mix_heatmap.outputs['Color'], mix_pattern.inputs['Color1'])
+    links.new(tex_img.outputs['Color'], mix_pattern.inputs['Color2'])
+
+    # FOV Masking
+    links.new(group_input.outputs['Texture Vector'], sep_uv.inputs['Vector'])
+    links.new(sep_uv.outputs['X'], sub_u.inputs[0])
+    links.new(sub_u.outputs[0], abs_u.inputs[0])
+    links.new(sep_uv.outputs['Y'], sub_v.inputs[0])
+    links.new(sub_v.outputs[0], abs_v.inputs[0])
+    links.new(abs_u.outputs[0], max_uv.inputs[0])
+    links.new(abs_v.outputs[0], max_uv.inputs[1])
+    links.new(max_uv.outputs[0], cmp_fov.inputs[0])
+
+    links.new(group_input.outputs['Clip to FOV'], sub_clip.inputs[1])
+    links.new(cmp_fov.outputs[0], add_fov.inputs[0])
+    links.new(sub_clip.outputs[0], add_fov.inputs[1])
+    links.new(add_fov.outputs[0], clamp_fov.inputs[0])
+
+    links.new(clamp_fov.outputs[0], mix_fov.inputs['Fac'])
+    links.new(mix_pattern.outputs['Color'], mix_fov.inputs['Color2'])
+
+    links.new(mix_fov.outputs['Color'], group_output.inputs['Color'])
+
+    return node_group
+
+
 
 def add_projector_node_tree_to_spot(spot):
     """
@@ -96,8 +554,8 @@ def add_projector_node_tree_to_spot(spot):
     node_group = bpy.data.node_groups.new('_Projector', 'ShaderNodeTree')
 
     # Create output sockets for the node group.
-    if(bpy.app.version >= (4, 0)):
-        node_group.interface.new_socket('texture vector',  in_out="OUTPUT", socket_type='NodeSocketVector')
+    if bpy.app.version >= (4, 0):
+        node_group.interface.new_socket('texture vector', in_out="OUTPUT", socket_type='NodeSocketVector')
         node_group.interface.new_socket('color', in_out="OUTPUT", socket_type='NodeSocketColor')
     else:
         output = node_group.outputs
@@ -171,7 +629,6 @@ def add_projector_node_tree_to_spot(spot):
 
     # b) Generated checker texture.
     checker_tex = nodes.new('ShaderNodeTexChecker')
-    # checker_tex.inputs['Color2'].default_value = random_color(alpha=True)
     checker_tex.inputs[3].default_value = 8
     checker_tex.inputs[1].default_value = (1, 1, 1, 1)
     checker_tex.location = auto_pos(y=-300)
@@ -204,7 +661,7 @@ def add_projector_node_tree_to_spot(spot):
     # ##############
 
     # Link inside group node
-    if(bpy.app.version >= (4, 0)):
+    if bpy.app.version >= (4, 0):
         tree.links.new(geo.outputs['Incoming'], vec_transform.inputs['Vector'])
         tree.links.new(vec_transform.outputs['Vector'], map_1.inputs['Vector'])
     else:
@@ -248,19 +705,112 @@ def add_projector_node_tree_to_spot(spot):
     root_tree.links.new(group.outputs[0], pixel_grid_node.inputs[1])
     root_tree.links.new(emission.outputs[0], pixel_grid_node.inputs[0])
 
+    # Optimal Depth Luminosity Node Setup
+    depth_lum_group = create_depth_luminosity_node_group()
+    depth_lum_node = root_tree.nodes.new('ShaderNodeGroup')
+    depth_lum_node.node_tree = depth_lum_group
+    depth_lum_node.label = "Depth Luminosity"
+    depth_lum_node.name = 'depth_lum'
+    depth_lum_node.location = (loc[0], loc[1] + 150)
+
+    root_tree.links.new(group.outputs[0], depth_lum_node.inputs['Texture Vector'])
+
+
+def get_projector_spot(projector):
+    """Return the child spotlight object of the projector."""
+    if not projector:
+        return None
+    for child in projector.children:
+        if child.type == 'LIGHT':
+            return child
+    return None
+
+
+def get_projector_body(projector):
+    """Return the child 3D mesh chassis body object of the projector."""
+    if not projector:
+        return None
+    for child in projector.children:
+        if child.type == 'MESH':
+            return child
+    return None
+
+
+def ensure_projector_body(projector, context=None):
+    """Find or create the Projector.Visual child mesh object."""
+    body = get_projector_body(projector)
+    if body is None:
+        mesh = bpy.data.meshes.new(f"{projector.name}.Visual")
+        body = bpy.data.objects.new(f"{projector.name}.Visual", mesh)
+        body[ADDON_ID.format('body')] = True
+        body.parent = projector
+        body.location = (0, 0, 0)
+        body.rotation_euler = (0, 0, 0)
+        if projector.users_collection:
+            projector.users_collection[0].objects.link(body)
+        elif context and hasattr(context, 'scene') and context.scene:
+            context.scene.collection.objects.link(body)
+        else:
+            bpy.context.scene.collection.objects.link(body)
+    return body
+
+
+def update_projector_mesh(proj_settings, context=None):
+    """Update or rebuild the procedural 3D physical chassis and mounting rig."""
+    projector = getattr(proj_settings, 'id_data', None)
+    if not projector or getattr(projector, 'type', None) != 'CAMERA':
+        projectors = get_projectors(context, only_selected=True) if context else []
+        projector = projectors[0] if projectors else None
+    if not projector or projector.type != 'CAMERA':
+        return
+
+    body = ensure_projector_body(projector, context)
+    show_body = getattr(proj_settings, 'show_projector_body', True)
+    body.hide_viewport = not show_body
+    body.hide_render = not show_body
+
+    if not show_body:
+        return
+
+    width = getattr(proj_settings, 'chassis_width', 0.380)
+    height = getattr(proj_settings, 'chassis_height', 0.121)
+    depth = getattr(proj_settings, 'chassis_depth', 0.277)
+    lens_offset_x = getattr(proj_settings, 'lens_offset_x', 0.085)
+    mount_type = getattr(proj_settings, 'mount_type', 'CEILING')
+    pole_length = getattr(proj_settings, 'mount_pole_length', 0.40)
+    chassis_color = getattr(proj_settings, 'chassis_color', 'WHITE')
+    inverted = getattr(proj_settings, 'mount_inverted', True)
+
+    from . import projector_mesh
+    projector_mesh.build_projector_mesh(
+        mesh_obj=body,
+        width=width,
+        height=height,
+        depth=depth,
+        lens_offset_x=lens_offset_x,
+        mount_type=mount_type,
+        mount_pole_length=pole_length,
+        chassis_color=chassis_color,
+        inverted=inverted
+    )
+
+
 def get_resolution(proj_settings, context):
     """ Find out what resolution is currently used and return it.
     Resolution from the dropdown or the resolution from the custom texture.
     """
     if proj_settings.use_custom_texture_res and proj_settings.projected_texture == Textures.CUSTOM_TEXTURE.value:
         projector = get_projector(context)
-        root_tree = projector.children[0].data.node_tree
-        image = root_tree.nodes['Image Texture'].image
-        if image:
-            w = image.size[0]
-            h = image.size[1]
+        spot = get_projector_spot(projector)
+        if spot:
+            root_tree = spot.data.node_tree
+            image = root_tree.nodes['Image Texture'].image
+            if image:
+                w, h = image.size[0], image.size[1]
+            else:
+                w, h = 300, 300
         else:
-            w, h = 300, 300
+            w, h = 1920, 1080
     else:
         w, h = proj_settings.resolution.split('x')
 
@@ -272,38 +822,39 @@ def update_throw_ratio(proj_settings, context):
     Adjust some settings on a camera to achieve a throw ratio
     """
     projector = get_projector(context)
-    # Update properties of the camera.
+    if not projector:
+        return
     throw_ratio = proj_settings.get('throw_ratio')
+    if not throw_ratio or throw_ratio <= 0:
+        return
     distance = 1
-    alpha = math.atan((distance/throw_ratio)*.5) * 2
+    alpha = math.atan((distance / throw_ratio) * 0.5) * 2
     projector.data.lens_unit = 'FOV'
     projector.data.angle = alpha
     projector.data.sensor_width = 10
     projector.data.display_size = 1
 
-    # Adjust Texture to fit new camera ###
+    # Adjust Texture to fit new camera
     w, h = get_resolution(proj_settings, context)
-    aspect_ratio = w/h
-    inverted_aspect_ratio = 1/aspect_ratio
+    aspect_ratio = w / h
+    inverted_aspect_ratio = 1 / aspect_ratio
 
     # Projected Texture
     update_projected_texture(proj_settings, context)
 
     # Update spotlight properties.
-    spot = projector.children[0]
-    nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
-    if bpy.app.version < (2, 81):
-        nodes['Mapping.001'].scale[0] = 1 / throw_ratio
-        nodes['Mapping.001'].scale[1] = 1 / throw_ratio * inverted_aspect_ratio
-    else:
-        nodes['Mapping.001'].inputs[3].default_value[0] = 1 / throw_ratio
-        nodes['Mapping.001'].inputs[3].default_value[1] = 1 / \
-            throw_ratio * inverted_aspect_ratio
+    spot = get_projector_spot(projector)
+    if spot:
+        nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
+        if bpy.app.version < (2, 81):
+            nodes['Mapping.001'].scale[0] = 1 / throw_ratio
+            nodes['Mapping.001'].scale[1] = 1 / throw_ratio * inverted_aspect_ratio
+        else:
+            nodes['Mapping.001'].inputs[3].default_value[0] = 1 / throw_ratio
+            nodes['Mapping.001'].inputs[3].default_value[1] = 1 / throw_ratio * inverted_aspect_ratio
 
     # Update lens shift because it depends on the throw ratio.
     update_lens_shift(proj_settings, context)
-
-    
 
 
 def update_lens_shift(proj_settings, context):
@@ -311,12 +862,16 @@ def update_lens_shift(proj_settings, context):
     Apply the shift to the camera and texture.
     """
     projector = get_projector(context)
+    if not projector:
+        return
     h_shift = proj_settings.get('h_shift', 0.0) / 100
     v_shift = proj_settings.get('v_shift', 0.0) / 100
-    throw_ratio = proj_settings.get('throw_ratio')
+    throw_ratio = proj_settings.get('throw_ratio', 1.0)
+    if throw_ratio <= 0:
+        throw_ratio = 1.0
 
     w, h = get_resolution(proj_settings, context)
-    inverted_aspect_ratio = h/w
+    inverted_aspect_ratio = h / w
 
     # Update the properties of the camera.
     cam = projector
@@ -324,43 +879,58 @@ def update_lens_shift(proj_settings, context):
     cam.data.shift_y = v_shift * inverted_aspect_ratio
 
     # Update spotlight node setup.
-    spot = projector.children[0]
-    nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
-    if bpy.app.version < (2, 81):
-        nodes['Mapping.001'].translation[0] = h_shift / throw_ratio
-        nodes['Mapping.001'].translation[1] = v_shift / throw_ratio * inverted_aspect_ratio
-    else:
-        nodes['Mapping.001'].inputs[1].default_value[0] = h_shift / throw_ratio
-        nodes['Mapping.001'].inputs[1].default_value[1] = v_shift / throw_ratio * inverted_aspect_ratio
+    spot = get_projector_spot(projector)
+    if spot:
+        nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
+        if bpy.app.version < (2, 81):
+            nodes['Mapping.001'].translation[0] = h_shift / throw_ratio
+            nodes['Mapping.001'].translation[1] = v_shift / throw_ratio * inverted_aspect_ratio
+        else:
+            nodes['Mapping.001'].inputs[1].default_value[0] = h_shift / throw_ratio
+            nodes['Mapping.001'].inputs[1].default_value[1] = v_shift / throw_ratio * inverted_aspect_ratio
 
 
 def update_resolution(proj_settings, context):
     projector = get_projector(context)
-    nodes = projector.children[0].data.node_tree.nodes['Group'].node_tree.nodes
-    # Change resolution image texture
-    nodes['Image Texture'].image = bpy.data.images[f'_proj.tex.{proj_settings.resolution}']
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
+    nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
+    img_name = f'_proj.tex.{proj_settings.resolution}'
+    if img_name in bpy.data.images:
+        nodes['Image Texture'].image = bpy.data.images[img_name]
     update_throw_ratio(proj_settings, context)
     update_pixel_grid(proj_settings, context)
 
 
 def update_checker_color(proj_settings, context):
-    # Update checker texture color
-    nodes = get_projector(
-        context).children[0].data.node_tree.nodes['Group'].node_tree.nodes
+    projector = get_projector(context)
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
+    nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
     c = proj_settings.projected_color
     nodes['Checker Texture'].inputs['Color2'].default_value = [c.r, c.g, c.b, 1]
 
 
 def update_power(proj_settings, context):
-    # Update spotlight power
-    spot = get_projector(context).children[0]
+    projector = get_projector(context)
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
     spot.data.energy = proj_settings["power"]
 
 
 def update_pixel_grid(proj_settings, context):
-    """ Update the pixel grid. Meaning, make it visible by linking the right node and updating the resolution. """
-    root_tree = get_projector(context).children[0].data.node_tree
+    """ Update the pixel grid visibility and resolution. """
+    projector = get_projector(context)
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
+    root_tree = spot.data.node_tree
     nodes = root_tree.nodes
+    if 'pixel_grid' not in nodes:
+        return
     pixel_grid_nodes = nodes['pixel_grid'].node_tree.nodes
     width, height = get_resolution(proj_settings, context)
     pixel_grid_nodes['_width'].outputs[0].default_value = width
@@ -370,27 +940,63 @@ def update_pixel_grid(proj_settings, context):
     else:
         root_tree.links.new(nodes['Emission'].outputs[0], nodes['Light Output'].inputs[0])
 
-    
+
+def update_depth_luminosity(proj_settings, context):
+    """ Update depth luminosity node group parameters (Min, Opt, Max distance and Mode). """
+    projector = getattr(proj_settings, 'id_data', None)
+    if not projector or getattr(projector, 'type', None) != 'CAMERA':
+        projector = get_projector(context)
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
+    root_tree = spot.data.node_tree
+    if 'depth_lum' not in root_tree.nodes:
+        return
+    dl_node = root_tree.nodes['depth_lum']
+    dl_node.inputs['Min Distance'].default_value = proj_settings.depth_min
+    dl_node.inputs['Optimal Distance'].default_value = proj_settings.depth_optimal
+    dl_node.inputs['Max Distance'].default_value = proj_settings.depth_max
+
+    mode_map = {'COMBINED': 0.0, 'HEATMAP': 1.0, 'PATTERN': 2.0}
+    dl_node.inputs['Mode'].default_value = mode_map.get(proj_settings.depth_vis_mode, 0.0)
+
+    if 'Contour Step' in dl_node.inputs:
+        dl_node.inputs['Contour Step'].default_value = max(0.01, proj_settings.depth_contour_step)
+    if 'Contour Intensity' in dl_node.inputs:
+        dl_node.inputs['Contour Intensity'].default_value = proj_settings.depth_contour_intensity
+    if 'Constant Brightness' in dl_node.inputs:
+        dl_node.inputs['Constant Brightness'].default_value = 1.0 if getattr(proj_settings, 'depth_constant_brightness', True) else 0.0
+    if 'Clip to FOV' in dl_node.inputs:
+        dl_node.inputs['Clip to FOV'].default_value = 1.0 if getattr(proj_settings, 'depth_clip_to_fov', True) else 0.0
+
+    dl_group = getattr(dl_node, 'node_tree', None)
+    if dl_group and 'Color Ramp' in dl_group.nodes:
+        cr = dl_group.nodes['Color Ramp']
+        use_zero_grad = getattr(proj_settings, 'depth_zero_gradient', True)
+        cr.color_ramp.interpolation = 'CONSTANT' if use_zero_grad else 'LINEAR'
+
+
+
 def create_pixel_grid_node_group():
+    if '_Projectors-Addon_PixelGrid' in bpy.data.node_groups:
+        return bpy.data.node_groups['_Projectors-Addon_PixelGrid']
+
     node_group = bpy.data.node_groups.new(
         '_Projectors-Addon_PixelGrid', 'ShaderNodeTree')
 
     # Create input/output sockets for the node group.
-    if(bpy.app.version >= (4, 0)):
+    if bpy.app.version >= (4, 0):
         node_group.interface.new_socket('Shader', socket_type='NodeSocketShader')
         node_group.interface.new_socket('Vector', socket_type='NodeSocketVector')
-
         node_group.interface.new_socket('Shader', in_out='OUTPUT', socket_type='NodeSocketShader')
     else:
         inputs = node_group.inputs
         inputs.new('NodeSocketShader', 'Shader')
         inputs.new('NodeSocketVector', 'Vector')
-
         outputs = node_group.outputs
         outputs.new('NodeSocketShader', 'Shader')
 
     nodes = node_group.nodes
-
     auto_pos = auto_offset()
 
     group_input = nodes.new('NodeGroupInput')
@@ -442,7 +1048,7 @@ def create_pixel_grid_node_group():
     mix_rgb.blend_type = 'MULTIPLY'
     mix_rgb.inputs[0].default_value = 1
     mix_rgb.location = auto_pos(200)
-    
+
     transparent = nodes.new('ShaderNodeBsdfTransparent')
     transparent.location = auto_pos(y=-200)
 
@@ -451,7 +1057,7 @@ def create_pixel_grid_node_group():
 
     group_output = nodes.new('NodeGroupOutput')
     group_output.location = auto_pos(100)
-    
+
     # Link Nodes
     links = node_group.links
 
@@ -479,11 +1085,11 @@ def create_pixel_grid_node_group():
     links.new(mix_shader.outputs[0], group_output.inputs[0])
 
     return node_group
-    
+
 
 def create_projector(context):
     """
-    Create a new projector composed out of a camera (parent obj) and a spotlight (child not intended for user interaction).
+    Create a new projector composed of a camera (parent obj) and a spotlight (child not intended for user interaction).
     The camera is the object intended for the user to manipulate and custom properties are stored there.
     The spotlight with a custom nodetree is responsible for actual projection of the texture.
     """
@@ -514,14 +1120,17 @@ def create_projector(context):
     # Parent light to cam.
     spot.parent = cam
 
-    # Move newly create projector (cam and spotlight) to 3D-Cursor position.
+    # Ensure 3D Body Mesh Object
+    ensure_projector_body(cam, context)
+
+    # Move newly created projector (cam and spotlight) to 3D-Cursor position.
     cam.location = context.scene.cursor.location
     cam.rotation_euler = context.scene.cursor.rotation_euler
     return cam
 
 
 def init_projector(proj_settings, context):
-    # # Add custom properties to store projector settings on the camera obj.
+    # Add custom properties to store projector settings on the camera obj.
     proj_settings.throw_ratio = 0.8
     proj_settings.power = 1000.0
     proj_settings.projected_texture = Textures.CHECKER.value
@@ -531,6 +1140,35 @@ def init_projector(proj_settings, context):
     proj_settings.resolution = '1920x1080'
     proj_settings.use_custom_texture_res = True
 
+    # Optimal Depth Luminosity defaults
+    proj_settings.depth_min = 1.5
+    proj_settings.depth_optimal = 3.5
+    proj_settings.depth_max = 7.0
+    proj_settings.depth_vis_mode = 'COMBINED'
+    proj_settings.depth_contour_step = 0.25
+    proj_settings.depth_contour_intensity = 0.75
+    proj_settings.depth_clip_to_fov = True
+    proj_settings.depth_constant_brightness = True
+    proj_settings.depth_zero_gradient = True
+
+    # 3D Physical Model & Rigging defaults
+    proj_settings.show_projector_body = True
+    proj_settings.chassis_color = 'WHITE'
+    proj_settings.chassis_width = 0.380
+    proj_settings.chassis_height = 0.121
+    proj_settings.chassis_depth = 0.277
+    proj_settings.lens_offset_x = 0.085
+    proj_settings.mount_type = 'CEILING'
+    proj_settings.mount_pole_length = 0.40
+    proj_settings.mount_inverted = True
+
+    # ProjectorCentral defaults
+    try:
+        proj_settings.pc_brand = 'BenQ'
+        proj_settings.pc_model = 'benq-ht2050a'
+    except Exception:
+        pass
+
     # Init Projector
     update_throw_ratio(proj_settings, context)
     update_projected_texture(proj_settings, context)
@@ -539,6 +1177,8 @@ def init_projector(proj_settings, context):
     update_lens_shift(proj_settings, context)
     update_power(proj_settings, context)
     update_pixel_grid(proj_settings, context)
+    update_depth_luminosity(proj_settings, context)
+    update_projector_mesh(proj_settings, context)
 
 
 class PROJECTOR_OT_create_projector(Operator):
@@ -559,28 +1199,36 @@ class PROJECTOR_OT_create_projector(Operator):
 
 def update_projected_texture(proj_settings, context):
     """ Update the projected output source. """
-    projector = get_projectors(context, only_selected=True)[0]
-    root_tree = projector.children[0].data.node_tree
+    projectors = get_projectors(context, only_selected=True)
+    if not projectors:
+        return
+    projector = projectors[0]
+    spot = get_projector_spot(projector)
+    if not spot:
+        return
+    root_tree = spot.data.node_tree
     group_tree = root_tree.nodes['Group'].node_tree
     group_output_node = group_tree.nodes['Group Output']
     group_node = root_tree.nodes['Group']
     emission_node = root_tree.nodes['Emission']
 
-    # Switch between the three possible cases by relinking some nodes.
     case = proj_settings.projected_texture
     if case == Textures.CHECKER.value:
         mix_node = group_tree.nodes['Mix.001']
-        group_tree.links.new(
-            mix_node.outputs['Color'], group_output_node.inputs[1])
+        group_tree.links.new(mix_node.outputs['Color'], group_output_node.inputs[1])
         root_tree.links.new(group_node.outputs[1], emission_node.inputs[0])
     elif case == Textures.COLOR_GRID.value:
         img_node = group_tree.nodes['Image Texture']
         group_tree.links.new(img_node.outputs[0], group_output_node.inputs[1])
         root_tree.links.new(group_node.outputs[1], emission_node.inputs[0])
+    elif case == Textures.OPTIMAL_DEPTH.value:
+        depth_lum_node = root_tree.nodes.get('depth_lum')
+        if depth_lum_node:
+            root_tree.links.new(depth_lum_node.outputs['Color'], emission_node.inputs[0])
+            update_depth_luminosity(proj_settings, context)
     elif case == Textures.CUSTOM_TEXTURE.value:
         custom_tex_node = root_tree.nodes['Image Texture']
-        root_tree.links.new(
-            custom_tex_node.outputs[0], emission_node.inputs[0])
+        root_tree.links.new(custom_tex_node.outputs[0], emission_node.inputs[0])
 
 
 class PROJECTOR_OT_delete_projector(Operator):
@@ -596,11 +1244,42 @@ class PROJECTOR_OT_delete_projector(Operator):
     def execute(self, context):
         selected_projectors = get_projectors(context, only_selected=True)
         for projector in selected_projectors:
-            for child in projector.children:
+            for child in list(projector.children):
+                data = child.data
                 bpy.data.objects.remove(child, do_unlink=True)
-            else:
-                bpy.data.objects.remove(projector, do_unlink=True)
+                if isinstance(data, bpy.types.Mesh):
+                    bpy.data.meshes.remove(data)
+                elif isinstance(data, bpy.types.Light):
+                    bpy.data.lights.remove(data)
+            cam_data = projector.data
+            bpy.data.objects.remove(projector, do_unlink=True)
+            if isinstance(cam_data, bpy.types.Camera):
+                bpy.data.cameras.remove(cam_data)
         return {'FINISHED'}
+        return {'FINISHED'}
+
+
+def get_pc_brands_items(self, context):
+    brands = projector_central.get_brands()
+    return [(b, b, f"Projectors manufactured by {b}", idx) for idx, b in enumerate(brands)]
+
+
+def get_pc_models_items(self, context):
+    brand = getattr(self, 'pc_brand', '')
+    if not brand:
+        brand = 'BenQ'
+    items = projector_central.get_models_for_brand(brand)
+    if not items:
+        return [('none', 'No models found', '', 0)]
+    return [(m[0], m[1], m[2], idx) for idx, m in enumerate(items)]
+
+
+def update_pc_brand(self, context):
+    pass
+
+
+def update_pc_model(self, context):
+    pass
 
 
 class ProjectorSettings(bpy.types.PropertyGroup):
@@ -627,13 +1306,13 @@ class ProjectorSettings(bpy.types.PropertyGroup):
     h_shift: bpy.props.FloatProperty(
         name="Horizontal Shift",
         description="Horizontal Lens Shift",
-        soft_min=-20, soft_max=20,
+        soft_min=-50, soft_max=50,
         update=update_lens_shift,
         subtype='PERCENTAGE')
     v_shift: bpy.props.FloatProperty(
         name="Vertical Shift",
         description="Vertical Lens Shift",
-        soft_min=-20, soft_max=20,
+        soft_min=-100, soft_max=100,
         update=update_lens_shift,
         subtype='PERCENTAGE')
     projected_color: bpy.props.FloatVectorProperty(
@@ -642,13 +1321,189 @@ class ProjectorSettings(bpy.types.PropertyGroup):
     projected_texture: bpy.props.EnumProperty(
         items=PROJECTED_OUTPUTS,
         default=Textures.CHECKER.value,
-        description="What do you to project?",
+        description="What do you want to project?",
         update=update_throw_ratio)
     show_pixel_grid: bpy.props.BoolProperty(
         name="Show Pixel Grid",
         description="When checked the image is divided into a pixel grid with the dimensions of the image resolution.",
         default=False,
         update=update_pixel_grid)
+
+    # Optimal Depth Luminosity Properties
+    depth_min: bpy.props.FloatProperty(
+        name="Min Throw Distance",
+        description="Minimum focused throw distance in meters",
+        default=1.5,
+        min=0.1,
+        soft_max=50.0,
+        unit='LENGTH',
+        update=update_depth_luminosity)
+    depth_optimal: bpy.props.FloatProperty(
+        name="Optimal Distance",
+        description="Optimal throw distance for recommended screen illuminance (lux)",
+        default=3.5,
+        min=0.1,
+        soft_max=50.0,
+        unit='LENGTH',
+        update=update_depth_luminosity)
+    depth_max: bpy.props.FloatProperty(
+        name="Max Throw Distance",
+        description="Maximum focused throw distance in meters",
+        default=7.0,
+        min=0.1,
+        soft_max=100.0,
+        unit='LENGTH',
+        update=update_depth_luminosity)
+    depth_vis_mode: bpy.props.EnumProperty(
+        name="Visualization Mode",
+        items=[
+            ('COMBINED', 'Combined', 'Saturated topological heatmap with overlay calibration chart', 0),
+            ('HEATMAP', 'Heatmap (Topological)', 'Pure saturated topological depth & lux heatmap with elevation contours', 1),
+            ('PATTERN', 'Calibration Chart', 'High-precision optical calibration test pattern', 2)
+        ],
+        default='COMBINED',
+        description="Mode for optimal depth luminosity visualization",
+        update=update_depth_luminosity)
+    depth_contour_step: bpy.props.FloatProperty(
+        name="Contour Interval",
+        description="Distance between topological contour lines in meters",
+        default=0.25,
+        min=0.01,
+        soft_max=5.0,
+        unit='LENGTH',
+        update=update_depth_luminosity)
+    depth_contour_intensity: bpy.props.FloatProperty(
+        name="Contour Strength",
+        description="Strength of topological contour lines on the heatmap",
+        default=0.75,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        update=update_depth_luminosity)
+    depth_clip_to_fov: bpy.props.BoolProperty(
+        name="Clip to FOV",
+        description="Limit projection strictly to projector FOV / aspect ratio frame",
+        default=True,
+        update=update_depth_luminosity)
+    depth_constant_brightness: bpy.props.BoolProperty(
+        name="Cancel Distance Dimming",
+        description="Keep constant surface brightness across distance to prevent far surfaces from dimming",
+        default=True,
+        update=update_depth_luminosity)
+    depth_zero_gradient: bpy.props.BoolProperty(
+        name="Zero Gradient",
+        description="Zero gradient hard cut between distance zones",
+        default=True,
+        update=update_depth_luminosity)
+
+
+    # ProjectorCentral Model Properties
+    pc_brand: bpy.props.EnumProperty(
+        name="Brand",
+        items=get_pc_brands_items,
+        description="Select projector manufacturer / brand",
+        update=update_pc_brand)
+    pc_model: bpy.props.EnumProperty(
+        name="Model",
+        items=get_pc_models_items,
+        description="Select projector model from ProjectorCentral database",
+        update=update_pc_model)
+    model_name: bpy.props.StringProperty(
+        name="Model Name",
+        default="Generic Projector")
+    model_lumens: bpy.props.IntProperty(
+        name="Lumens",
+        default=2000,
+        min=1)
+    model_throw_ratio_min: bpy.props.FloatProperty(
+        name="Min Throw Ratio",
+        default=1.15)
+    model_throw_ratio_max: bpy.props.FloatProperty(
+        name="Max Throw Ratio",
+        default=1.50)
+    model_lens_shift_v: bpy.props.FloatProperty(
+        name="Vertical Shift %",
+        default=10.0)
+    model_lens_shift_h: bpy.props.FloatProperty(
+        name="Horizontal Shift %",
+        default=0.0)
+    model_technology: bpy.props.StringProperty(
+        name="Technology",
+        default="DLP")
+    model_contrast: bpy.props.StringProperty(
+        name="Contrast",
+        default="15,000:1")
+
+    # 3D Physical Chassis & Rigging Properties
+    show_projector_body: bpy.props.BoolProperty(
+        name="Show 3D Projector",
+        description="Display 3D projector chassis, lens assembly, and mounting hardware",
+        default=True,
+        update=update_projector_mesh)
+    chassis_color: bpy.props.EnumProperty(
+        name="Chassis Color",
+        items=[
+            ('WHITE', 'White', 'Matte white chassis body', 0),
+            ('BLACK', 'Black / Charcoal', 'Dark charcoal / black chassis body', 1)
+        ],
+        default='WHITE',
+        description="Finish color of the projector outer housing",
+        update=update_projector_mesh)
+    chassis_width: bpy.props.FloatProperty(
+        name="Width",
+        description="Physical projector chassis width in meters",
+        default=0.380,
+        min=0.05,
+        soft_max=2.0,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    chassis_height: bpy.props.FloatProperty(
+        name="Height",
+        description="Physical projector chassis height in meters",
+        default=0.121,
+        min=0.03,
+        soft_max=1.0,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    chassis_depth: bpy.props.FloatProperty(
+        name="Depth",
+        description="Physical projector chassis depth in meters",
+        default=0.277,
+        min=0.05,
+        soft_max=2.0,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    lens_offset_x: bpy.props.FloatProperty(
+        name="Lens Offset X",
+        description="Horizontal lens offset from projector body center (positive = right offset)",
+        default=0.085,
+        min=-0.8,
+        soft_max=0.8,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    mount_type: bpy.props.EnumProperty(
+        name="Mount Type",
+        items=[
+            ('NONE', 'Tabletop (Rubber Feet)', 'Adjustable knurled rubber leveling feet on underside', 0),
+            ('CEILING', 'Ceiling Mount (Spider & Pole)', 'Universal spider arms, gimbal, drop pipe, and ceiling flange', 1),
+            ('TRUSS', 'Truss Clamp (Half-Coupler & Safety)', 'Theatrical 50mm half-coupler clamp and aircraft steel safety cable', 2)
+        ],
+        default='CEILING',
+        description="Mounting system and hardware attached to underside mounting points",
+        update=update_projector_mesh)
+    mount_pole_length: bpy.props.FloatProperty(
+        name="Drop Pole Length",
+        description="Length of ceiling extension drop pipe in meters",
+        default=0.40,
+        min=0.05,
+        soft_max=5.0,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    mount_inverted: bpy.props.BoolProperty(
+        name="Invert Projector",
+        description="Mount projector inverted (upside down) so underside holes face ceiling/truss (standard practice)",
+        default=True,
+        update=update_projector_mesh)
 
 
 def register():
