@@ -90,16 +90,19 @@ class PROJECTOR_OT_apply_pc_model(Operator):
             proj_settings.lens_offset_y = model_data['lens_offset_y']
         if 'imager_diagonal_inch' in model_data:
             proj_settings.imager_diagonal_inch = model_data['imager_diagonal_inch']
+        if 'focal_length_mm' in model_data:
+            proj_settings.focal_length_mm = model_data['focal_length_mm']
         if 'fov_origin_depth' in model_data:
             proj_settings.fov_origin_depth = model_data['fov_origin_depth']
 
         # Update all node and scene settings
-        from .projector import update_projector_mesh
+        from .projector import update_projector_mesh, update_texture_interpolation
         update_resolution(proj_settings, context)
         update_throw_ratio(proj_settings, context)
         update_power(proj_settings, context)
         update_lens_shift(proj_settings, context)
         update_depth_luminosity(proj_settings, context)
+        update_texture_interpolation(proj_settings, context)
         update_projector_mesh(proj_settings, context)
 
         self.report({'INFO'}, f"Applied specs for {model_data.get('title', model_id)}")

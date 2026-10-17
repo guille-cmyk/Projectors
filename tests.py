@@ -1,3 +1,5 @@
+import os
+import sys
 import unittest
 import bpy
 from bpy.app.handlers import persistent
@@ -6,6 +8,9 @@ from bpy.types import Operator
 try:
     from . import projector_central
 except ImportError:
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    if _dir not in sys.path:
+        sys.path.insert(0, _dir)
     import projector_central
 
 
@@ -25,7 +30,7 @@ class TestProjector(unittest.TestCase):
     def setUp(self):
         bpy.ops.projector.create()
         self.c = bpy.context.object  # Camera
-        self.s = self.c.children[0]  # Spot Light
+        self.s = [ch for ch in self.c.children if ch.type == 'LIGHT'][0]  # Spot Light
         self.nodes = self.s.data.node_tree.nodes
 
     def test_correct_projector_creation(self):
@@ -33,12 +38,12 @@ class TestProjector(unittest.TestCase):
         self.assertEqual(self.c.type, 'CAMERA')
         self.assertEqual(self.c.data.lens_unit, 'FOV')
         # Light
-        self.assertEqual(self.c.children[0].type, 'LIGHT')
-        self.assertEqual(self.c.children[0].data.type, 'SPOT')
-        self.assertEqual(self.c.children[0].hide_select, True)
-        self.assertAlmostEqual(self.c.children[0].data.shadow_soft_size, 0.0)
+        self.assertEqual(self.s.type, 'LIGHT')
+        self.assertEqual(self.s.data.type, 'SPOT')
+        self.assertEqual(self.s.hide_select, True)
+        self.assertAlmostEqual(self.s.data.shadow_soft_size, 0.0)
         self.assertAlmostEqual(
-            self.c.children[0].data.cycles.use_multiple_importance_sampling, False)
+            self.s.data.cycles.use_multiple_importance_sampling, False)
 
     def test_existences_of_custom_properties(self):
         self.assertIn('proj_settings', self.c)
@@ -254,21 +259,41 @@ class TestProjector(unittest.TestCase):
         self.assertFalse(body.visible_shadow)
         self.assertTrue(body.show_wire)
 
-        # 2. Check geometry exists (clean box + detailed internal FOV origin assembly)
+        # 2. Check ultra-lightweight memory-cheap geometry:
+        # strictly 6 polygons (the bounding box) and 8..12 vertices (8 box verts + 1D mount line)
         mesh_data = body.data
-        self.assertGreater(len(mesh_data.vertices), 200)
-        self.assertGreater(len(mesh_data.polygons), 100)
+        self.assertEqual(len(mesh_data.polygons), 6)
+        # Default mount_type is 'CEILING' -> 8 box verts + 2 line verts = 10 verts, 12 box edges + 1 mount edge = 13 edges
+        self.assertEqual(len(mesh_data.vertices), 10)
+        self.assertEqual(len(mesh_data.edges), 13)
 
-        # 3. Check all 7 materials assigned
-        self.assertEqual(len(mesh_data.materials), 7)
-        mat_names = [m.name for m in mesh_data.materials]
-        self.assertTrue(any('Chassis' in n for n in mat_names))
-        self.assertIn('Projector_Lens_Barrel', mat_names)
-        self.assertIn('Projector_Lens_Glass', mat_names)
-        self.assertIn('Projector_Mount_Metal', mat_names)
+        # Check TRUSS mount -> 8 box verts + 4 line verts (stem + horizontal truss axis) = 12 verts, 14 edges
+        self.c.proj_settings.mount_type = 'TRUSS'
+        self.assertEqual(len(mesh_data.polygons), 6)
+        self.assertEqual(len(mesh_data.vertices), 12)
+        self.assertEqual(len(mesh_data.edges), 14)
+
+        # Check TABLETOP mount -> 8 box verts + 2 line verts = 10 verts, 13 edges
+        self.c.proj_settings.mount_type = 'TABLETOP'
+        self.assertEqual(len(mesh_data.polygons), 6)
+        self.assertEqual(len(mesh_data.vertices), 10)
+        self.assertEqual(len(mesh_data.edges), 13)
+
+        # Check NONE mount -> strictly 8 vertices, 12 edges, 6 polygons
+        self.c.proj_settings.mount_type = 'NONE'
+        self.assertEqual(len(mesh_data.polygons), 6)
+        self.assertEqual(len(mesh_data.vertices), 8)
+        self.assertEqual(len(mesh_data.edges), 12)
+
+        # Restore CEILING
+        self.c.proj_settings.mount_type = 'CEILING'
+
+        # 3. Check strictly 1 shared material assigned for memory efficiency
+        self.assertEqual(len(mesh_data.materials), 1)
+        self.assertTrue(mesh_data.materials[0].name.startswith('Projector_Box_'))
 
         # 4. Verify Chassis Box is strictly a clean 6-face rectangular box with exact W x H x D measures
-        chassis_polys = [p for p in mesh_data.polygons if p.material_index == 0]
+        chassis_polys = list(mesh_data.polygons)
         self.assertEqual(len(chassis_polys), 6)
         chassis_vert_idxs = {vi for p in chassis_polys for vi in p.vertices}
         self.assertEqual(len(chassis_vert_idxs), 8)
@@ -294,6 +319,27 @@ class TestProjector(unittest.TestCase):
         self.assertGreater(max(v.x for v in c_verts), 0.0)
         self.assertLess(min(v.y for v in c_verts), 0.0)
         self.assertGreater(max(v.y for v in c_verts), 0.0)
+
+    def test_texture_interpolation_point_cubic(self):
+        # Default must be 'Closest' (Point filtering) so individual pixels are visible
+        self.assertEqual(self.c.proj_settings.texture_interpolation, 'Closest')
+        root_tree = self.s.data.node_tree
+        group_img = root_tree.nodes['Group'].node_tree.nodes['Image Texture']
+        custom_img = root_tree.nodes['Image Texture']
+        depth_img = root_tree.nodes['depth_lum'].node_tree.nodes['Image Texture']
+        self.assertEqual(group_img.interpolation, 'Closest')
+        self.assertEqual(custom_img.interpolation, 'Closest')
+        self.assertEqual(depth_img.interpolation, 'Closest')
+
+        # Switch to 'Cubic' and verify all image texture nodes update
+        self.c.proj_settings.texture_interpolation = 'Cubic'
+        self.assertEqual(group_img.interpolation, 'Cubic')
+        self.assertEqual(custom_img.interpolation, 'Cubic')
+        self.assertEqual(depth_img.interpolation, 'Cubic')
+
+        # Switch back to 'Closest'
+        self.c.proj_settings.texture_interpolation = 'Closest'
+        self.assertEqual(group_img.interpolation, 'Closest')
 
     def test_installation_centroid_pivot_kinematics(self):
         from mathutils import Vector

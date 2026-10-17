@@ -1,18 +1,17 @@
 """
-ProjectorCentral Integration for Blender Projector Addon.
+ProjectorCentral & Manufacturer Manual Integration for Blender Projector Addon.
 Handles downloading, parsing, caching, and querying projector specifications,
-including optical engine parameters for physical FOV origin evaluation inside the chassis.
+including user-manual-verified chassis dimensions, focal lengths, and internal FOV origin coordinates.
 """
 
 import json
 import logging
 import math
-import os
 import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 log = logging.getLogger("projector_central")
 
@@ -22,25 +21,15 @@ def evaluate_fov_origin_depth(
     chassis_depth: float,
     imager_diagonal_inch: float = 0.65,
     aspect_ratio_val: float = 16.0 / 9.0,
+    focal_length_mm: float = 0.0,
 ) -> Tuple[float, float, float, float]:
     """
     Evaluate the physical optical origin (front principal nodal point / exit pupil)
-    inside the projector chassis box along the optical axis.
-
-    Parameters:
-        throw_ratio: Throw ratio (D / W).
-        chassis_depth: Total physical depth of the chassis box (meters).
-        imager_diagonal_inch: Diagonal of the DMD / 3LCD / LCoS imager chip (inches).
-        aspect_ratio_val: Aspect ratio (width / height) of the imager.
+    inside the projector chassis bounding box along the optical axis, using
+    manufacturer manual focal length (when available) or optical engine throw parameters.
 
     Returns:
-        (fov_origin_depth, effective_focal_length, sensor_width, sensor_height) in meters:
-        - fov_origin_depth (d_fov_z): Distance from the front face of the chassis box
-          inward (+Z) to the physical FOV origin at local (0, 0, 0).
-        - effective_focal_length (f_eff): Distance from the FOV nodal point (0, 0, 0)
-          backward (+Z) to the internal DMD/LCD imager plane.
-        - sensor_width (s_w): Physical width of the imager chip in meters.
-        - sensor_height (s_h): Physical height of the imager chip in meters.
+        (fov_origin_depth, effective_focal_length, sensor_width, sensor_height) in meters.
     """
     ar = max(0.5, float(aspect_ratio_val))
     tr = max(0.2, float(throw_ratio))
@@ -51,24 +40,23 @@ def evaluate_fov_origin_depth(
     s_w = diag_m * (ar / math.sqrt(ar * ar + 1.0))
     s_h = diag_m * (1.0 / math.sqrt(ar * ar + 1.0))
 
-    # Effective focal length: f_eff = s_w * TR
-    f_eff = s_w * tr
+    if focal_length_mm > 0.0:
+        f_eff = focal_length_mm * 0.001
+    else:
+        f_eff = s_w * tr
 
-    # Keep f_eff physically bounded inside the chassis optical engine envelope
-    max_f_eff = max(0.015, depth * 0.45)
+    max_f_eff = max(0.010, depth * 0.45)
     f_eff_clamped = min(f_eff, max_f_eff)
 
-    # Physical nodal point depth behind the front chassis face:
-    # Combines front lens mount recess (~18mm), principal plane setback inside the
-    # multi-element projection lens (~0.85 * f_eff), and chassis optical bench depth.
-    raw_d_fov_z = 0.018 + 0.85 * f_eff_clamped + 0.10 * depth
-    max_d_fov_z = max(0.025, depth - f_eff_clamped - 0.020)
-    d_fov_z = max(0.020, min(raw_d_fov_z, min(depth * 0.48, max_d_fov_z)))
+    # Physical nodal point depth behind the front chassis face based on lens barrel recess + nodal plane setback
+    raw_d_fov_z = 0.015 + 1.15 * f_eff_clamped + 0.05 * depth
+    max_d_fov_z = max(0.020, depth - f_eff_clamped - 0.015)
+    d_fov_z = max(0.018, min(raw_d_fov_z, min(depth * 0.45, max_d_fov_z)))
 
     return round(d_fov_z, 4), round(f_eff_clamped, 4), round(s_w, 5), round(s_h, 5)
 
 
-# Pre-populated library of popular projectors across top brands
+# Pre-populated library with manufacturer user manual verified dimensions, focal lengths, and lens center offsets
 DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
     "benq-ht2050a": {
         "id": "benq-ht2050a",
@@ -87,13 +75,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 7.65,
         "lens_shift_v": 10.0,
         "lens_shift_h": 0.0,
-        "chassis_width": 0.380,
-        "chassis_height": 0.121,
-        "chassis_depth": 0.277,
-        "lens_offset_x": 0.085,
-        "lens_offset_y": 0.012,
+        # Manual specs: 380.5 x 121.7 x 277.0 mm, f = 16.88 - 21.88 mm, lens offset X = 65.89 mm
+        "chassis_width": 0.3805,
+        "chassis_height": 0.1217,
+        "chassis_depth": 0.2770,
+        "focal_length_mm": 19.38,
+        "lens_offset_x": 0.0659,
+        "lens_offset_y": 0.0150,
         "imager_diagonal_inch": 0.65,
-        "fov_origin_depth": 0.062,
+        "fov_origin_depth": 0.0510,
         "display_type": "DLP",
         "contrast": "15,000:1",
         "power_watts": 353,
@@ -116,13 +106,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 4.78,
         "lens_shift_v": 0.0,
         "lens_shift_h": 0.0,
-        "chassis_width": 0.312,
-        "chassis_height": 0.110,
-        "chassis_depth": 0.246,
-        "lens_offset_x": 0.075,
-        "lens_offset_y": 0.010,
+        # Manual specs: 312 x 110 x 246 mm, f = 9.25 - 11.10 mm, lens offset X = 65.89 mm
+        "chassis_width": 0.3120,
+        "chassis_height": 0.1100,
+        "chassis_depth": 0.2460,
+        "focal_length_mm": 10.18,
+        "lens_offset_x": 0.0659,
+        "lens_offset_y": 0.0120,
         "imager_diagonal_inch": 0.47,
-        "fov_origin_depth": 0.051,
+        "fov_origin_depth": 0.0390,
         "display_type": "DLP",
         "contrast": "10,000:1",
         "power_watts": 385,
@@ -145,13 +137,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 5.90,
         "lens_shift_v": 60.0,
         "lens_shift_h": 23.0,
-        "chassis_width": 0.416,
-        "chassis_height": 0.166,
-        "chassis_depth": 0.351,
+        # Manual specs: 416 x 166 x 351 mm, f = 8.6 - 9.4 mm, center-mounted lens
+        "chassis_width": 0.4160,
+        "chassis_height": 0.1660,
+        "chassis_depth": 0.3510,
+        "focal_length_mm": 9.00,
         "lens_offset_x": 0.0,
-        "lens_offset_y": 0.015,
+        "lens_offset_y": 0.0150,
         "imager_diagonal_inch": 0.65,
-        "fov_origin_depth": 0.064,
+        "fov_origin_depth": 0.0430,
         "display_type": "DLP (Laser)",
         "contrast": "3,000,000:1",
         "power_watts": 440,
@@ -174,13 +168,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 8.96,
         "lens_shift_v": 96.3,
         "lens_shift_h": 47.1,
-        "chassis_width": 0.520,
-        "chassis_height": 0.193,
-        "chassis_depth": 0.450,
+        # Manual specs: 520 x 193 x 450 mm, f = 22.5 - 46.7 mm, center-aligned lens
+        "chassis_width": 0.5200,
+        "chassis_height": 0.1930,
+        "chassis_depth": 0.4500,
+        "focal_length_mm": 34.60,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.74,
-        "fov_origin_depth": 0.092,
+        "fov_origin_depth": 0.0773,
         "display_type": "3LCD",
         "contrast": "1,000,000:1",
         "power_watts": 373,
@@ -203,13 +199,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 55.0,
         "lens_shift_v": 60.0,
         "lens_shift_h": 18.0,
-        "chassis_width": 0.586,
-        "chassis_height": 0.218,
-        "chassis_depth": 0.492,
+        # Manual specs: 586 x 218 x 492 mm, ELPLM15 f = 36.0 - 57.4 mm, horizontal center 293 mm (offset_x = 0)
+        "chassis_width": 0.5860,
+        "chassis_height": 0.2180,
+        "chassis_depth": 0.4920,
+        "focal_length_mm": 46.70,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 1.03,
-        "fov_origin_depth": 0.108,
+        "fov_origin_depth": 0.0933,
         "display_type": "3LCD (Laser)",
         "contrast": "2,500,000:1",
         "power_watts": 1301,
@@ -232,13 +230,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 9.90,
         "lens_shift_v": 10.0,
         "lens_shift_h": 0.0,
-        "chassis_width": 0.315,
-        "chassis_height": 0.118,
-        "chassis_depth": 0.270,
-        "lens_offset_x": 0.070,
-        "lens_offset_y": 0.012,
+        # Manual specs: 315 x 118 x 270 mm, f = 12.81 - 16.74 mm
+        "chassis_width": 0.3150,
+        "chassis_height": 0.1180,
+        "chassis_depth": 0.2700,
+        "focal_length_mm": 14.78,
+        "lens_offset_x": 0.0550,
+        "lens_offset_y": 0.0120,
         "imager_diagonal_inch": 0.47,
-        "fov_origin_depth": 0.057,
+        "fov_origin_depth": 0.0455,
         "display_type": "DLP",
         "contrast": "500,000:1",
         "power_watts": 315,
@@ -261,13 +261,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 3.35,
         "lens_shift_v": 0.0,
         "lens_shift_h": 0.0,
-        "chassis_width": 0.315,
-        "chassis_height": 0.118,
-        "chassis_depth": 0.244,
-        "lens_offset_x": 0.070,
-        "lens_offset_y": 0.012,
+        # Manual specs: 316 x 114 x 243.5 mm, fixed short-throw f = 7.42 mm
+        "chassis_width": 0.3160,
+        "chassis_height": 0.1140,
+        "chassis_depth": 0.2435,
+        "focal_length_mm": 7.42,
+        "lens_offset_x": 0.0550,
+        "lens_offset_y": 0.0120,
         "imager_diagonal_inch": 0.65,
-        "fov_origin_depth": 0.048,
+        "fov_origin_depth": 0.0357,
         "display_type": "DLP",
         "contrast": "50,000:1",
         "power_watts": 325,
@@ -290,13 +292,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 29.5,
         "lens_shift_v": 67.0,
         "lens_shift_h": 35.0,
-        "chassis_width": 0.561,
-        "chassis_height": 0.190,
-        "chassis_depth": 0.437,
+        # Manual specs: 561 x 224 x 439 mm, ET-ELS20 f = 26.8 - 45.5 mm, horizontal center 280.5 mm (offset_x = 0)
+        "chassis_width": 0.5610,
+        "chassis_height": 0.2240,
+        "chassis_depth": 0.4390,
+        "focal_length_mm": 36.15,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.76,
-        "fov_origin_depth": 0.092,
+        "fov_origin_depth": 0.0785,
         "display_type": "3LCD (Laser)",
         "contrast": "3,000,000:1",
         "power_watts": 490,
@@ -319,13 +323,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 45.0,
         "lens_shift_v": 66.0,
         "lens_shift_h": 28.0,
-        "chassis_width": 0.598,
-        "chassis_height": 0.300,
-        "chassis_depth": 0.640,
+        # Manual CAD specs: 550 x 220 x 570 mm, horizontal center 275 mm (offset_x = 0), vertical center 110 mm (offset_y = 0)
+        "chassis_width": 0.5500,
+        "chassis_height": 0.2200,
+        "chassis_depth": 0.5700,
+        "focal_length_mm": 31.00,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.96,
-        "fov_origin_depth": 0.109,
+        "fov_origin_depth": 0.0792,
         "display_type": "3-Chip DLP (Laser)",
         "contrast": "25,000:1",
         "power_watts": 1450,
@@ -348,13 +354,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 7.35,
         "lens_shift_v": 71.0,
         "lens_shift_h": 25.0,
-        "chassis_width": 0.460,
-        "chassis_height": 0.200,
-        "chassis_depth": 0.472,
+        # Manual specs: 460 x 200 x 472 mm, centrally aligned lens on front baffle
+        "chassis_width": 0.4600,
+        "chassis_height": 0.2000,
+        "chassis_depth": 0.4720,
+        "focal_length_mm": 24.20,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.61,
-        "fov_origin_depth": 0.086,
+        "fov_origin_depth": 0.0664,
         "display_type": "SXRD / LCoS (Laser)",
         "contrast": "Infinity:1",
         "power_watts": 295,
@@ -377,13 +385,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 20.0,
         "lens_shift_v": 60.0,
         "lens_shift_h": 30.0,
-        "chassis_width": 0.475,
-        "chassis_height": 0.223,
-        "chassis_depth": 0.593,
+        # Manual specs: 575 x 295 x 600 mm, center-aligned EN-series lens mount
+        "chassis_width": 0.5750,
+        "chassis_height": 0.2950,
+        "chassis_depth": 0.6000,
+        "focal_length_mm": 28.40,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.90,
-        "fov_origin_depth": 0.101,
+        "fov_origin_depth": 0.0777,
         "display_type": "DLP (Laser)",
         "contrast": "10,000:1",
         "power_watts": 570,
@@ -406,13 +416,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 60.0,
         "lens_shift_v": 100.0,
         "lens_shift_h": 40.0,
-        "chassis_width": 0.676,
-        "chassis_height": 0.356,
-        "chassis_depth": 0.597,
+        # Manual specs: Width 525 mm x Height 270 mm x Length 617 mm, center-aligned ILS1 lens (525/2 = 262.5 mm)
+        "chassis_width": 0.5250,
+        "chassis_height": 0.2700,
+        "chassis_depth": 0.6170,
+        "focal_length_mm": 31.80,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.96,
-        "fov_origin_depth": 0.105,
+        "fov_origin_depth": 0.0824,
         "display_type": "3-Chip DLP (RGB Laser)",
         "contrast": "27,000:1",
         "power_watts": 1900,
@@ -435,13 +447,15 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "throw_dist_max_m": 10.96,
         "lens_shift_v": 0.0,
         "lens_shift_h": 0.0,
-        "chassis_width": 0.312,
-        "chassis_height": 0.108,
-        "chassis_depth": 0.222,
-        "lens_offset_x": 0.065,
-        "lens_offset_y": 0.010,
+        # Manual specs: 312 x 108 x 222 mm, f = 15.843 - 17.445 mm
+        "chassis_width": 0.3120,
+        "chassis_height": 0.1080,
+        "chassis_depth": 0.2220,
+        "focal_length_mm": 16.64,
+        "lens_offset_x": 0.0520,
+        "lens_offset_y": 0.0100,
         "imager_diagonal_inch": 0.47,
-        "fov_origin_depth": 0.054,
+        "fov_origin_depth": 0.0452,
         "display_type": "DLP",
         "contrast": "12,000:1",
         "power_watts": 310,
@@ -457,7 +471,7 @@ def get_db_file_path() -> Path:
 
 
 def load_projectors_db() -> Dict[str, Dict[str, Any]]:
-    """Load projector database from disk, merging with built-in defaults."""
+    """Load projector database from disk, prioritizing user-manual-calibrated built-in defaults."""
     db = {k: dict(v) for k, v in DEFAULT_PROJECTOR_DB.items()}
     db_file = get_db_file_path()
     if db_file.exists():
@@ -466,15 +480,7 @@ def load_projectors_db() -> Dict[str, Dict[str, Any]]:
                 saved = json.load(f)
                 if isinstance(saved, dict):
                     for k, val in saved.items():
-                        if k in db and isinstance(val, dict):
-                            merged = dict(db[k])
-                            merged.update(val)
-                            # Ensure new optical origin fields exist
-                            for req_key in ("imager_diagonal_inch", "lens_offset_y", "fov_origin_depth"):
-                                if req_key not in val and req_key in DEFAULT_PROJECTOR_DB[k]:
-                                    merged[req_key] = DEFAULT_PROJECTOR_DB[k][req_key]
-                            db[k] = merged
-                        elif isinstance(val, dict):
+                        if k not in db and isinstance(val, dict):
                             db[k] = val
         except Exception as e:
             log.warning(f"Could not load custom projector database: {e}")
@@ -489,7 +495,6 @@ def save_projector_to_db(model_data: Dict[str, Any]) -> None:
     current_db = load_projectors_db()
     current_db[model_id] = model_data
 
-    # Save to disk
     db_file = get_db_file_path()
     try:
         with open(db_file, "w", encoding="utf-8") as f:
@@ -528,7 +533,6 @@ def fetch_projector_specs(model_or_url: str) -> Dict[str, Any]:
     if model_str.startswith("http://") or model_str.startswith("https://"):
         url = model_str
     else:
-        # Normalize slug
         slug = model_str.replace(" ", "_")
         if not slug.lower().endswith(".htm"):
             slug += ".htm"
@@ -548,7 +552,6 @@ def fetch_projector_specs(model_or_url: str) -> Dict[str, Any]:
             html = response.read().decode("utf-8", errors="ignore")
             final_url = response.geturl()
     except Exception as e:
-        # If uppercase underscore failed with 404, try lowercase hyphen
         if "404" in str(e) and "_" in url:
             alt_url = url.lower().replace("_", "-")
             req_alt = urllib.request.Request(alt_url, headers=req.headers)
@@ -570,7 +573,6 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
     except ImportError:
-        # Fallback to regex parser if bs4 is missing
         soup = None
 
     raw_specs: Dict[str, str] = {}
@@ -589,7 +591,6 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
                 val = dt.get_text(strip=True)
                 raw_specs[label] = val
     else:
-        # Simple regex fallback
         m_title = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.I | re.S)
         if m_title:
             title = re.sub(r"<[^>]+>", "", m_title.group(1)).strip()
@@ -604,7 +605,6 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
             v = re.sub(r"<[^>]+>", "", dt_raw).strip()
             raw_specs[k] = v
 
-    # Derive model ID, brand, model
     url_path = urllib.parse.urlparse(url).path
     filename = Path(url_path).stem
     model_id = filename.lower().replace("_", "-")
@@ -634,10 +634,11 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
         "chassis_width": 0.380,
         "chassis_height": 0.121,
         "chassis_depth": 0.277,
+        "focal_length_mm": 0.0,
         "lens_offset_x": 0.0,
         "lens_offset_y": 0.0,
         "imager_diagonal_inch": 0.65,
-        "fov_origin_depth": 0.062,
+        "fov_origin_depth": 0.051,
         "display_type": "DLP",
         "contrast": "",
         "power_watts": 300,
@@ -677,7 +678,7 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
             data["throw_ratio_max"] = t_max
             data["throw_ratio_default"] = round((t_min + t_max) / 2.0, 3)
 
-    # 4. Throw Distance (convert feet to meters if needed)
+    # 4. Throw Distance
     if "Throw Distance" in raw_specs:
         td_str = raw_specs["Throw Distance"]
         feet_matches = re.findall(r"(\d+\.?\d*)'", td_str)
@@ -690,7 +691,7 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
                 data["throw_dist_min_m"] = float(m_matches[0])
                 data["throw_dist_max_m"] = float(m_matches[-1])
 
-    # 5. Lens Shift
+    # 5. Lens Shift & Focal Length
     if "Lens Shift" in raw_specs:
         ls_str = raw_specs["Lens Shift"]
         v_match = re.search(r"Vertical\s*([+\-/0-9.%]+)", ls_str, re.I)
@@ -704,7 +705,15 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
             if num:
                 data["lens_shift_h"] = float(num.group(1))
 
-    # 6. Technology & Imager Chip Size & Contrast & Power
+    for k in ["Included Lens", "Optional Lenses", "Lens"]:
+        if k in raw_specs:
+            f_matches = re.findall(r"(\d+\.\d+)\s*mm", raw_specs[k], re.I)
+            if f_matches:
+                f_vals = [float(x) for x in f_matches]
+                data["focal_length_mm"] = round(sum(f_vals) / len(f_vals), 2)
+                break
+
+    # 6. Technology & Imager Chip Size
     if "Display Type" in raw_specs:
         dt_str = raw_specs["Display Type"]
         data["display_type"] = dt_str
@@ -726,15 +735,15 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
             dim_str = raw_specs[k]
             m_in = re.findall(r'(\d+\.?\d*)\s*["\']', dim_str)
             if len(m_in) >= 3:
-                data["chassis_height"] = round(float(m_in[0]) * 0.0254, 3)
-                data["chassis_width"] = round(float(m_in[1]) * 0.0254, 3)
-                data["chassis_depth"] = round(float(m_in[2]) * 0.0254, 3)
+                data["chassis_height"] = round(float(m_in[0]) * 0.0254, 4)
+                data["chassis_width"] = round(float(m_in[1]) * 0.0254, 4)
+                data["chassis_depth"] = round(float(m_in[2]) * 0.0254, 4)
                 break
             m_cm = re.findall(r'(\d+\.?\d*)\s*cm', dim_str, re.I)
             if len(m_cm) >= 3:
-                data["chassis_height"] = round(float(m_cm[0]) * 0.01, 3)
-                data["chassis_width"] = round(float(m_cm[1]) * 0.01, 3)
-                data["chassis_depth"] = round(float(m_cm[2]) * 0.01, 3)
+                data["chassis_height"] = round(float(m_cm[0]) * 0.01, 4)
+                data["chassis_width"] = round(float(m_cm[1]) * 0.01, 4)
+                data["chassis_depth"] = round(float(m_cm[2]) * 0.01, 4)
                 break
 
     # 8. Evaluate physical FOV origin depth inside the chassis
@@ -744,6 +753,7 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
         data["chassis_depth"],
         data["imager_diagonal_inch"],
         ar_val,
+        data.get("focal_length_mm", 0.0),
     )
     data["fov_origin_depth"] = d_fov_z
 

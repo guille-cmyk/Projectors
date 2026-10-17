@@ -77,6 +77,7 @@ class PROJECTOR_PT_projector_settings(Panel):
             col.prop(proj_settings, 'h_shift', text='Horizontal Shift')
             col.prop(proj_settings, 'v_shift', text='Vertical Shift')
             layout.prop(proj_settings, 'projected_texture', text='Project')
+            box.prop(proj_settings, 'texture_interpolation', text='Interpolation')
 
             # Optimal Depth Luminosity Controls
             if proj_settings.projected_texture == Textures.OPTIMAL_DEPTH.value:
@@ -129,7 +130,7 @@ class PROJECTOR_PT_projector_settings(Panel):
 
 
 class PROJECTOR_PT_rigging(Panel):
-    bl_label = "Chassis Box, Internal FOV Origin & Pivot"
+    bl_label = "Bounding Box, FOV Origin & Mount Line"
     bl_parent_id = "OBJECT_PT_projector_n_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -147,11 +148,11 @@ class PROJECTOR_PT_rigging(Panel):
         layout.use_property_decorate = False
         proj_settings = projector.proj_settings
 
-        layout.prop(proj_settings, 'show_projector_body', text="Show 3D Chassis & FOV")
+        layout.prop(proj_settings, 'show_projector_body', text="Show Bounding Box & Mount Line")
 
-        # 1. Accurate Chassis Box Dimensions
+        # 1. Accurate Chassis Bounding Box Dimensions
         dim_box = layout.box()
-        dim_box.label(text="Accurate Chassis Box (W × H × D)", icon="CUBE")
+        dim_box.label(text="Chassis Bounding Box (Manual W × H × D)", icon="CUBE")
         dim_box.prop(proj_settings, 'chassis_color', text="Box Finish")
         dim_box.prop(proj_settings, 'chassis_width', text="Width")
         dim_box.prop(proj_settings, 'chassis_height', text="Height")
@@ -159,11 +160,12 @@ class PROJECTOR_PT_rigging(Panel):
 
         # 2. Internal Physical FOV Origin Evaluation
         fov_box = layout.box()
-        fov_box.label(text="Internal FOV Origin (Inside Chassis)", icon="CON_CAMERASOLVER")
+        fov_box.label(text="Internal FOV Origin (User Manual Specs)", icon="CON_CAMERASOLVER")
         fov_box.prop(proj_settings, 'auto_fov_origin', text="Auto-Evaluate Origin")
         depth_row = fov_box.row()
         depth_row.enabled = not proj_settings.auto_fov_origin
         depth_row.prop(proj_settings, 'fov_origin_depth', text="Origin Depth (+Z)")
+        fov_box.prop(proj_settings, 'focal_length_mm', text="Focal Length (mm)")
         fov_box.prop(proj_settings, 'imager_diagonal_inch', text="Imager Chip (in)")
         fov_box.prop(proj_settings, 'lens_offset_x', text="Lens Offset X")
         fov_box.prop(proj_settings, 'lens_offset_y', text="Lens Offset Y")
@@ -172,9 +174,10 @@ class PROJECTOR_PT_rigging(Panel):
         w_res, h_res = get_resolution(proj_settings, context)
         ar = (w_res / h_res) if h_res > 0 else (16.0 / 9.0)
         d_fov_z = proj_settings.fov_origin_depth
+        f_mm = getattr(proj_settings, 'focal_length_mm', 0.0)
         _, f_eff, s_w, s_h = projector_central.evaluate_fov_origin_depth(
             proj_settings.throw_ratio, proj_settings.chassis_depth,
-            proj_settings.imager_diagonal_inch, ar
+            proj_settings.imager_diagonal_inch, ar, f_mm
         )
         z_front = -d_fov_z
         z_rear = proj_settings.chassis_depth - d_fov_z
@@ -182,17 +185,17 @@ class PROJECTOR_PT_rigging(Panel):
         tel_col.scale_y = 0.82
         tel_col.label(text="FOV Origin Nodal Pt: Local (0, 0, 0) mm", icon="DOT")
         tel_col.label(text=f"Front Face Z: {z_front*1000:.1f} mm | Rear Z: +{z_rear*1000:.1f} mm")
-        tel_col.label(text=f"Imager Plane Z: +{f_eff*1000:.1f} mm ({s_w*1000:.1f}×{s_h*1000:.1f} mm)")
+        tel_col.label(text=f"Focal Length: {f_eff*1000:.2f} mm ({s_w*1000:.1f}×{s_h*1000:.1f} mm chip)")
 
-        # 3. Installation Support & Centroid Pivot Point
+        # 3. Installation Support Line & Centroid Pivot Point
         mount_box = layout.box()
-        mount_box.label(text="Installation Support & Centroid Pivot", icon="PIVOT_CURSOR")
-        mount_box.prop(proj_settings, 'mount_type', text="Support")
+        mount_box.label(text="Mounting Line & Centroid Pivot", icon="PIVOT_CURSOR")
+        mount_box.prop(proj_settings, 'mount_type', text="Mount Line")
         if proj_settings.mount_type != 'NONE':
-            mount_box.prop(proj_settings, 'pivot_at_installation', text="Pivot at Support Centroid")
+            mount_box.prop(proj_settings, 'pivot_at_installation', text="Pivot at Mount Centroid")
             if proj_settings.mount_type == 'CEILING':
                 col = mount_box.column(align=True)
-                col.prop(proj_settings, 'mount_pole_length', text="Drop Pole")
+                col.prop(proj_settings, 'mount_pole_length', text="Drop Line")
                 col.prop(proj_settings, 'mount_inverted', text="Invert Projector")
             elif proj_settings.mount_type == 'TRUSS':
                 mount_box.prop(proj_settings, 'mount_inverted', text="Invert Projector")
@@ -205,9 +208,9 @@ class PROJECTOR_PT_rigging(Panel):
                 piv_col.label(text=f"Pivot Centroid: ({px*1000:.1f}, {py*1000:.1f}, {pz*1000:.1f}) mm", icon="EMPTY_AXIS")
                 piv_col.label(text=f"Pivot → FOV Lever Arm: {lever_mm:.1f} mm")
 
-            mount_box.operator('projector.snap_pivot_to_cursor', text="Snap Support Pivot to 3D Cursor", icon="CURSOR")
+            mount_box.operator('projector.snap_pivot_to_cursor', text="Snap Mount Pivot to 3D Cursor", icon="CURSOR")
 
-        layout.operator('projector.rebuild_mesh', text="Refresh 3D Model & Pivot", icon="FILE_REFRESH")
+        layout.operator('projector.rebuild_mesh', text="Refresh Bounding Box & Pivot", icon="FILE_REFRESH")
 
 
 class PROJECTOR_PT_projected_color(Panel):

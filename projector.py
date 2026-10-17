@@ -180,25 +180,27 @@ def create_optimal_depth_texture(img_name: str = '_proj.tex.optimal_depth'):
     return bpy.data.images[img_name]
 
 
+def ensure_resolution_texture(res_str: str = '1920x1080'):
+    """Lazily create only the active resolution texture on demand to stay memory-cheap."""
+    img_name = f'_proj.tex.{res_str}'
+    if not bpy.data.images.get(img_name):
+        w, h = res_str.split('x')
+        log.debug(f'Create projection texture: {res_str}')
+        bpy.ops.image.new(name=img_name,
+                          width=int(w),
+                          height=int(h),
+                          color=(0.0, 0.0, 0.0, 1.0),
+                          alpha=True,
+                          generated_type='COLOR_GRID',
+                          float=False)
+    bpy.data.images[img_name].use_fake_user = True
+    return bpy.data.images[img_name]
+
+
 def create_projector_textures():
-    """ This function checks if the needed images exist and if not creates them. """
-    name_template = '_proj.tex.{}'
-    for res in RESOLUTIONS:
-        img_name = name_template.format(res[0])
-        w, h = res[0].split('x')
-        if not bpy.data.images.get(img_name):
-            log.debug(f'Create projection texture: {res}')
-            bpy.ops.image.new(name=img_name,
-                              width=int(w),
-                              height=int(h),
-                              color=(0.0, 0.0, 0.0, 1.0),
-                              alpha=True,
-                              generated_type='COLOR_GRID',
-                              float=False)
+    """Ensure default active projection textures exist without pre-allocating all 13 resolutions in RAM."""
+    ensure_resolution_texture('1920x1080')
 
-        bpy.data.images[img_name].use_fake_user = True
-
-    # Optimal Depth Luminosity Texture
     depth_tex_name = '_proj.tex.optimal_depth'
     if not bpy.data.images.get(depth_tex_name):
         create_optimal_depth_texture(depth_tex_name)
@@ -225,6 +227,9 @@ def create_depth_luminosity_node_group():
 
         cr_node = existing.nodes.get('Color Ramp')
         is_constant = cr_node and cr_node.color_ramp.interpolation == 'CONSTANT' and len(cr_node.color_ramp.elements) == 3
+        tex_node = existing.nodes.get('Image Texture')
+        if tex_node and tex_node.interpolation not in {'Closest', 'Cubic'}:
+            tex_node.interpolation = 'Closest'
 
         if has_new_sockets and is_constant:
             return existing
@@ -375,6 +380,7 @@ def create_depth_luminosity_node_group():
     if bpy.data.images.get('_proj.tex.optimal_depth'):
         tex_img.image = bpy.data.images['_proj.tex.optimal_depth']
     tex_img.extension = 'CLIP'
+    tex_img.interpolation = 'Closest'
     tex_img.location = auto_pos(0, y=200)
 
     # 6. Combined Mode: Alpha-blended overlay (Heatmap base + crisp line art, NO DIMMING)
@@ -622,9 +628,10 @@ def add_projector_node_tree_to_spot(spot):
     add.location = auto_pos(350)
 
     # Texture
-    # a) Image
+    # a) Image (Point / Closest interpolation to see individual pixels)
     img = nodes.new('ShaderNodeTexImage')
     img.extension = 'CLIP'
+    img.interpolation = 'Closest'
     img.location = auto_pos(200)
 
     # b) Generated checker texture.
@@ -644,9 +651,10 @@ def add_projector_node_tree_to_spot(spot):
     # # Root Nodes #
     # ##############
     auto_pos_root = auto_offset()
-    # Image Texture
+    # Image Texture (Point / Closest interpolation to see individual pixels)
     user_texture = root_tree.nodes.new('ShaderNodeTexImage')
     user_texture.extension = 'CLIP'
+    user_texture.interpolation = 'Closest'
     user_texture.label = 'Add your Image Texture or Movie here'
     user_texture.location = auto_pos_root(200, y=200)
     # Emission
@@ -805,12 +813,13 @@ def update_projector_mesh(proj_settings, context=None):
     body.hide_viewport = not show_body
     body.hide_render = not show_body
 
-    width = getattr(proj_settings, 'chassis_width', 0.380)
-    height = getattr(proj_settings, 'chassis_height', 0.121)
-    depth = getattr(proj_settings, 'chassis_depth', 0.277)
-    lens_offset_x = getattr(proj_settings, 'lens_offset_x', 0.085)
-    lens_offset_y = getattr(proj_settings, 'lens_offset_y', 0.012)
+    width = getattr(proj_settings, 'chassis_width', 0.3805)
+    height = getattr(proj_settings, 'chassis_height', 0.1217)
+    depth = getattr(proj_settings, 'chassis_depth', 0.2770)
+    lens_offset_x = getattr(proj_settings, 'lens_offset_x', 0.0659)
+    lens_offset_y = getattr(proj_settings, 'lens_offset_y', 0.0150)
     imager_diag = getattr(proj_settings, 'imager_diagonal_inch', 0.65)
+    focal_mm = getattr(proj_settings, 'focal_length_mm', 19.38)
     throw_ratio = getattr(proj_settings, 'throw_ratio', 1.325) or 1.325
     h_shift = getattr(proj_settings, 'h_shift', 0.0)
     v_shift = getattr(proj_settings, 'v_shift', 0.0)
@@ -825,11 +834,11 @@ def update_projector_mesh(proj_settings, context=None):
     # Evaluate physical FOV origin depth inside the chassis when auto_fov_origin is enabled
     if getattr(proj_settings, 'auto_fov_origin', True):
         d_fov_z, _, _, _ = projector_central.evaluate_fov_origin_depth(
-            throw_ratio, depth, imager_diag, aspect_ratio
+            throw_ratio, depth, imager_diag, aspect_ratio, focal_mm
         )
         proj_settings['fov_origin_depth'] = d_fov_z
     else:
-        d_fov_z = getattr(proj_settings, 'fov_origin_depth', 0.062)
+        d_fov_z = getattr(proj_settings, 'fov_origin_depth', 0.0510)
 
     from . import projector_mesh
     if show_body:
@@ -961,8 +970,33 @@ def update_lens_shift(proj_settings, context):
             nodes['Mapping.001'].inputs[1].default_value[0] = h_shift / throw_ratio
             nodes['Mapping.001'].inputs[1].default_value[1] = v_shift / throw_ratio * inverted_aspect_ratio
 
-    # Rebuild internal FOV frustum inside the chassis box when throw_ratio or lens shift updates
     update_projector_mesh(proj_settings, context)
+
+
+def update_texture_interpolation(proj_settings, context):
+    """Set Point ('Closest') or 'Cubic' texture interpolation on all projected image nodes so pixels are visible."""
+    projector = getattr(proj_settings, 'id_data', None)
+    if not projector or getattr(projector, 'type', None) != 'CAMERA':
+        projector = get_projector(context)
+    spot = get_projector_spot(projector)
+    if not spot or not spot.data.node_tree:
+        return
+
+    interp = getattr(proj_settings, 'texture_interpolation', 'Closest')
+    if interp not in {'Closest', 'Cubic'}:
+        interp = 'Closest'
+
+    root_nodes = spot.data.node_tree.nodes
+    if 'Image Texture' in root_nodes:
+        root_nodes['Image Texture'].interpolation = interp
+    if 'Group' in root_nodes and root_nodes['Group'].node_tree:
+        g_nodes = root_nodes['Group'].node_tree.nodes
+        if 'Image Texture' in g_nodes:
+            g_nodes['Image Texture'].interpolation = interp
+    if 'depth_lum' in root_nodes and root_nodes['depth_lum'].node_tree:
+        dl_nodes = root_nodes['depth_lum'].node_tree.nodes
+        if 'Image Texture' in dl_nodes:
+            dl_nodes['Image Texture'].interpolation = interp
 
 
 def update_resolution(proj_settings, context):
@@ -971,9 +1005,9 @@ def update_resolution(proj_settings, context):
     if not spot:
         return
     nodes = spot.data.node_tree.nodes['Group'].node_tree.nodes
-    img_name = f'_proj.tex.{proj_settings.resolution}'
-    if img_name in bpy.data.images:
-        nodes['Image Texture'].image = bpy.data.images[img_name]
+    img = ensure_resolution_texture(proj_settings.resolution)
+    nodes['Image Texture'].image = img
+    update_texture_interpolation(proj_settings, context)
     update_throw_ratio(proj_settings, context)
     update_pixel_grid(proj_settings, context)
 
@@ -1209,6 +1243,7 @@ def init_projector(proj_settings, context):
     proj_settings.throw_ratio = 0.8
     proj_settings.power = 1000.0
     proj_settings.projected_texture = Textures.CHECKER.value
+    proj_settings.texture_interpolation = 'Closest'
     proj_settings.h_shift = 0.0
     proj_settings.v_shift = 0.0
     proj_settings.projected_color = random_color()
@@ -1226,17 +1261,18 @@ def init_projector(proj_settings, context):
     proj_settings.depth_constant_brightness = True
     proj_settings.depth_zero_gradient = True
 
-    # 3D Physical Model, Internal FOV Origin & Installation Pivot defaults
+    # 3D Physical Model, Internal FOV Origin & Installation Pivot defaults (BenQ HT2050A User Manual)
     proj_settings.show_projector_body = True
     proj_settings.chassis_color = 'WHITE'
-    proj_settings.chassis_width = 0.380
-    proj_settings.chassis_height = 0.121
-    proj_settings.chassis_depth = 0.277
-    proj_settings.lens_offset_x = 0.085
-    proj_settings.lens_offset_y = 0.012
+    proj_settings.chassis_width = 0.3805
+    proj_settings.chassis_height = 0.1217
+    proj_settings.chassis_depth = 0.2770
+    proj_settings.lens_offset_x = 0.0659
+    proj_settings.lens_offset_y = 0.0150
     proj_settings.imager_diagonal_inch = 0.65
+    proj_settings.focal_length_mm = 19.38
     proj_settings.auto_fov_origin = True
-    proj_settings.fov_origin_depth = 0.062
+    proj_settings.fov_origin_depth = 0.0510
     proj_settings.mount_type = 'CEILING'
     proj_settings.mount_pole_length = 0.40
     proj_settings.mount_inverted = True
@@ -1252,6 +1288,7 @@ def init_projector(proj_settings, context):
     # Init Projector
     update_throw_ratio(proj_settings, context)
     update_projected_texture(proj_settings, context)
+    update_texture_interpolation(proj_settings, context)
     update_resolution(proj_settings, context)
     update_checker_color(proj_settings, context)
     update_lens_shift(proj_settings, context)
@@ -1309,6 +1346,7 @@ def update_projected_texture(proj_settings, context):
     elif case == Textures.CUSTOM_TEXTURE.value:
         custom_tex_node = root_tree.nodes['Image Texture']
         root_tree.links.new(custom_tex_node.outputs[0], emission_node.inputs[0])
+    update_texture_interpolation(proj_settings, context)
 
 
 class PROJECTOR_OT_delete_projector(Operator):
@@ -1402,6 +1440,15 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         default=Textures.CHECKER.value,
         description="What do you want to project?",
         update=update_throw_ratio)
+    texture_interpolation: bpy.props.EnumProperty(
+        name="Texture Filtering",
+        items=[
+            ('Closest', 'Point (Closest)', 'No interpolation — sharp individual pixels visible', 0),
+            ('Cubic', 'Cubic', 'Cubic B-spline interpolation across pixels', 1),
+        ],
+        default='Closest',
+        description="Texture sampling filter for projected images (Point/Closest shows sharp individual pixels; Cubic applies cubic filtering)",
+        update=update_texture_interpolation)
     show_pixel_grid: bpy.props.BoolProperty(
         name="Show Pixel Grid",
         description="When checked the image is divided into a pixel grid with the dimensions of the image resolution.",
@@ -1516,54 +1563,54 @@ class ProjectorSettings(bpy.types.PropertyGroup):
     # 3D Physical Chassis Box, Internal FOV Origin & Installation Pivot Properties
     show_projector_body: bpy.props.BoolProperty(
         name="Show 3D Projector",
-        description="Display accurate chassis box, internal FOV origin geometry, and installation support",
+        description="Display accurate chassis bounding box and 1D mounting line",
         default=True,
         update=update_projector_mesh)
     chassis_color: bpy.props.EnumProperty(
         name="Chassis Color",
         items=[
-            ('WHITE', 'White', 'Translucent white chassis box', 0),
-            ('BLACK', 'Black / Charcoal', 'Translucent charcoal / black chassis box', 1)
+            ('WHITE', 'White', 'Translucent white chassis bounding box', 0),
+            ('BLACK', 'Black / Charcoal', 'Translucent charcoal / black chassis bounding box', 1)
         ],
         default='WHITE',
         description="Color of the accurate chassis bounding box",
         update=update_projector_mesh)
     chassis_width: bpy.props.FloatProperty(
         name="Width",
-        description="Physical projector chassis width in meters",
-        default=0.380,
+        description="Physical projector chassis width in meters (from manufacturer user manual)",
+        default=0.3805,
         min=0.05,
         soft_max=2.0,
         unit='LENGTH',
         update=update_projector_mesh)
     chassis_height: bpy.props.FloatProperty(
         name="Height",
-        description="Physical projector chassis height in meters",
-        default=0.121,
+        description="Physical projector chassis height in meters (from manufacturer user manual)",
+        default=0.1217,
         min=0.03,
         soft_max=1.0,
         unit='LENGTH',
         update=update_projector_mesh)
     chassis_depth: bpy.props.FloatProperty(
         name="Depth",
-        description="Physical projector chassis depth in meters",
-        default=0.277,
+        description="Physical projector chassis depth in meters (from manufacturer user manual)",
+        default=0.2770,
         min=0.05,
         soft_max=2.0,
         unit='LENGTH',
         update=update_projector_mesh)
     lens_offset_x: bpy.props.FloatProperty(
         name="Lens Offset X",
-        description="Horizontal offset of the internal FOV origin from the chassis center (positive = right offset)",
-        default=0.085,
+        description="Horizontal offset of the internal FOV origin from the chassis center (from manufacturer user manual)",
+        default=0.0659,
         min=-0.8,
         soft_max=0.8,
         unit='LENGTH',
         update=update_projector_mesh)
     lens_offset_y: bpy.props.FloatProperty(
         name="Lens Offset Y",
-        description="Vertical offset of the internal FOV origin from the chassis center",
-        default=0.012,
+        description="Vertical offset of the internal FOV origin from the chassis center (from manufacturer user manual)",
+        default=0.0150,
         min=-0.4,
         soft_max=0.4,
         unit='LENGTH',
@@ -1575,15 +1622,22 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         min=0.20,
         soft_max=2.0,
         update=update_projector_mesh)
+    focal_length_mm: bpy.props.FloatProperty(
+        name="Lens Focal Length (mm)",
+        description="Optical lens focal length in millimeters from the manufacturer user manual (0 = derive from throw ratio & chip size)",
+        default=19.38,
+        min=0.0,
+        soft_max=150.0,
+        update=update_projector_mesh)
     auto_fov_origin: bpy.props.BoolProperty(
         name="Auto-Evaluate Internal FOV Origin",
-        description="Automatically evaluate the physical FOV origin depth inside the chassis from throw ratio, imager chip size, and chassis depth",
+        description="Automatically evaluate the physical FOV origin depth inside the chassis from manual focal length, throw ratio, imager chip size, and chassis depth",
         default=True,
         update=update_projector_mesh)
     fov_origin_depth: bpy.props.FloatProperty(
         name="FOV Origin Depth Inside Chassis",
         description="Distance from the front chassis face inward (+Z) to the physical FOV origin nodal point at local (0, 0, 0)",
-        default=0.062,
+        default=0.0510,
         min=0.008,
         soft_max=0.60,
         unit='LENGTH',
@@ -1591,17 +1645,17 @@ class ProjectorSettings(bpy.types.PropertyGroup):
     mount_type: bpy.props.EnumProperty(
         name="Installation Support",
         items=[
-            ('NONE', 'None (Bare Chassis Box)', 'No support hardware; FOV pivot remains at the internal FOV origin (0, 0, 0)', 0),
-            ('TABLETOP', 'Tabletop Support (Feet Centroid Pivot)', '4 leveling support pads; FOV pivot at centroid of tabletop support plane', 1),
-            ('CEILING', 'Ceiling Mount (Ceiling Plate Centroid Pivot)', 'Ceiling drop mount; FOV pivot at centroid of ceiling installation plate', 2),
-            ('TRUSS', 'Truss Clamp (Truss Pipe Centroid Pivot)', '50mm truss coupler clamp; FOV pivot at centroid of truss installation point', 3)
+            ('NONE', 'None (Bounding Box Only)', 'No support line; FOV pivot remains at the internal FOV origin (0, 0, 0)', 0),
+            ('TABLETOP', 'Tabletop Line (Feet Centroid Pivot)', 'Single line to tabletop plane; FOV pivot at centroid of tabletop support', 1),
+            ('CEILING', 'Ceiling Line (Ceiling Centroid Pivot)', 'Single line to ceiling drop point; FOV pivot at ceiling installation centroid', 2),
+            ('TRUSS', 'Truss Line (Truss Pipe Centroid Pivot)', 'Single line to truss rigging axis; FOV pivot at truss installation centroid', 3)
         ],
         default='CEILING',
-        description="Select installation support; sets the FOV rotation pivot point to the centroid of that installation point",
+        description="Select installation support signaled by a single line; sets the FOV rotation pivot point to the centroid of that installation point",
         update=update_projector_mesh)
     mount_pole_length: bpy.props.FloatProperty(
-        name="Drop Pole Length",
-        description="Length of ceiling extension drop pipe in meters",
+        name="Drop Line Length",
+        description="Length of ceiling drop line in meters",
         default=0.40,
         min=0.05,
         soft_max=5.0,
@@ -1614,7 +1668,7 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         update=update_projector_mesh)
     pivot_at_installation: bpy.props.BoolProperty(
         name="Pivot FOV at Installation Centroid",
-        description="Place the projector FOV rotation pivot point at the exact centroid of the selected installation support point",
+        description="Place the projector FOV rotation pivot point at the exact centroid of the selected installation support line",
         default=True,
         update=update_projector_mesh)
 
