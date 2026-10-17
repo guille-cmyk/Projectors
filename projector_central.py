@@ -1,10 +1,12 @@
 """
 ProjectorCentral Integration for Blender Projector Addon.
-Handles downloading, parsing, caching, and querying projector specifications.
+Handles downloading, parsing, caching, and querying projector specifications,
+including optical engine parameters for physical FOV origin evaluation inside the chassis.
 """
 
 import json
 import logging
+import math
 import os
 import re
 import urllib.parse
@@ -13,6 +15,58 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("projector_central")
+
+
+def evaluate_fov_origin_depth(
+    throw_ratio: float,
+    chassis_depth: float,
+    imager_diagonal_inch: float = 0.65,
+    aspect_ratio_val: float = 16.0 / 9.0,
+) -> Tuple[float, float, float, float]:
+    """
+    Evaluate the physical optical origin (front principal nodal point / exit pupil)
+    inside the projector chassis box along the optical axis.
+
+    Parameters:
+        throw_ratio: Throw ratio (D / W).
+        chassis_depth: Total physical depth of the chassis box (meters).
+        imager_diagonal_inch: Diagonal of the DMD / 3LCD / LCoS imager chip (inches).
+        aspect_ratio_val: Aspect ratio (width / height) of the imager.
+
+    Returns:
+        (fov_origin_depth, effective_focal_length, sensor_width, sensor_height) in meters:
+        - fov_origin_depth (d_fov_z): Distance from the front face of the chassis box
+          inward (+Z) to the physical FOV origin at local (0, 0, 0).
+        - effective_focal_length (f_eff): Distance from the FOV nodal point (0, 0, 0)
+          backward (+Z) to the internal DMD/LCD imager plane.
+        - sensor_width (s_w): Physical width of the imager chip in meters.
+        - sensor_height (s_h): Physical height of the imager chip in meters.
+    """
+    ar = max(0.5, float(aspect_ratio_val))
+    tr = max(0.2, float(throw_ratio))
+    depth = max(0.08, float(chassis_depth))
+    diag_in = max(0.2, float(imager_diagonal_inch))
+
+    diag_m = diag_in * 0.0254
+    s_w = diag_m * (ar / math.sqrt(ar * ar + 1.0))
+    s_h = diag_m * (1.0 / math.sqrt(ar * ar + 1.0))
+
+    # Effective focal length: f_eff = s_w * TR
+    f_eff = s_w * tr
+
+    # Keep f_eff physically bounded inside the chassis optical engine envelope
+    max_f_eff = max(0.015, depth * 0.45)
+    f_eff_clamped = min(f_eff, max_f_eff)
+
+    # Physical nodal point depth behind the front chassis face:
+    # Combines front lens mount recess (~18mm), principal plane setback inside the
+    # multi-element projection lens (~0.85 * f_eff), and chassis optical bench depth.
+    raw_d_fov_z = 0.018 + 0.85 * f_eff_clamped + 0.10 * depth
+    max_d_fov_z = max(0.025, depth - f_eff_clamped - 0.020)
+    d_fov_z = max(0.020, min(raw_d_fov_z, min(depth * 0.48, max_d_fov_z)))
+
+    return round(d_fov_z, 4), round(f_eff_clamped, 4), round(s_w, 5), round(s_h, 5)
+
 
 # Pre-populated library of popular projectors across top brands
 DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
@@ -37,6 +91,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.121,
         "chassis_depth": 0.277,
         "lens_offset_x": 0.085,
+        "lens_offset_y": 0.012,
+        "imager_diagonal_inch": 0.65,
+        "fov_origin_depth": 0.062,
         "display_type": "DLP",
         "contrast": "15,000:1",
         "power_watts": 353,
@@ -63,6 +120,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.110,
         "chassis_depth": 0.246,
         "lens_offset_x": 0.075,
+        "lens_offset_y": 0.010,
+        "imager_diagonal_inch": 0.47,
+        "fov_origin_depth": 0.051,
         "display_type": "DLP",
         "contrast": "10,000:1",
         "power_watts": 385,
@@ -89,6 +149,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.166,
         "chassis_depth": 0.351,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.015,
+        "imager_diagonal_inch": 0.65,
+        "fov_origin_depth": 0.064,
         "display_type": "DLP (Laser)",
         "contrast": "3,000,000:1",
         "power_watts": 440,
@@ -115,6 +178,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.193,
         "chassis_depth": 0.450,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.74,
+        "fov_origin_depth": 0.092,
         "display_type": "3LCD",
         "contrast": "1,000,000:1",
         "power_watts": 373,
@@ -141,6 +207,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.218,
         "chassis_depth": 0.492,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 1.03,
+        "fov_origin_depth": 0.108,
         "display_type": "3LCD (Laser)",
         "contrast": "2,500,000:1",
         "power_watts": 1301,
@@ -167,6 +236,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.118,
         "chassis_depth": 0.270,
         "lens_offset_x": 0.070,
+        "lens_offset_y": 0.012,
+        "imager_diagonal_inch": 0.47,
+        "fov_origin_depth": 0.057,
         "display_type": "DLP",
         "contrast": "500,000:1",
         "power_watts": 315,
@@ -193,6 +265,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.118,
         "chassis_depth": 0.244,
         "lens_offset_x": 0.070,
+        "lens_offset_y": 0.012,
+        "imager_diagonal_inch": 0.65,
+        "fov_origin_depth": 0.048,
         "display_type": "DLP",
         "contrast": "50,000:1",
         "power_watts": 325,
@@ -219,6 +294,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.190,
         "chassis_depth": 0.437,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.76,
+        "fov_origin_depth": 0.092,
         "display_type": "3LCD (Laser)",
         "contrast": "3,000,000:1",
         "power_watts": 490,
@@ -245,6 +323,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.300,
         "chassis_depth": 0.640,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.96,
+        "fov_origin_depth": 0.109,
         "display_type": "3-Chip DLP (Laser)",
         "contrast": "25,000:1",
         "power_watts": 1450,
@@ -271,6 +352,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.200,
         "chassis_depth": 0.472,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.61,
+        "fov_origin_depth": 0.086,
         "display_type": "SXRD / LCoS (Laser)",
         "contrast": "Infinity:1",
         "power_watts": 295,
@@ -297,6 +381,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.223,
         "chassis_depth": 0.593,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.90,
+        "fov_origin_depth": 0.101,
         "display_type": "DLP (Laser)",
         "contrast": "10,000:1",
         "power_watts": 570,
@@ -323,6 +410,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.356,
         "chassis_depth": 0.597,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.96,
+        "fov_origin_depth": 0.105,
         "display_type": "3-Chip DLP (RGB Laser)",
         "contrast": "27,000:1",
         "power_watts": 1900,
@@ -349,6 +439,9 @@ DEFAULT_PROJECTOR_DB: Dict[str, Dict[str, Any]] = {
         "chassis_height": 0.108,
         "chassis_depth": 0.222,
         "lens_offset_x": 0.065,
+        "lens_offset_y": 0.010,
+        "imager_diagonal_inch": 0.47,
+        "fov_origin_depth": 0.054,
         "display_type": "DLP",
         "contrast": "12,000:1",
         "power_watts": 310,
@@ -365,14 +458,24 @@ def get_db_file_path() -> Path:
 
 def load_projectors_db() -> Dict[str, Dict[str, Any]]:
     """Load projector database from disk, merging with built-in defaults."""
-    db = dict(DEFAULT_PROJECTOR_DB)
+    db = {k: dict(v) for k, v in DEFAULT_PROJECTOR_DB.items()}
     db_file = get_db_file_path()
     if db_file.exists():
         try:
             with open(db_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 if isinstance(saved, dict):
-                    db.update(saved)
+                    for k, val in saved.items():
+                        if k in db and isinstance(val, dict):
+                            merged = dict(db[k])
+                            merged.update(val)
+                            # Ensure new optical origin fields exist
+                            for req_key in ("imager_diagonal_inch", "lens_offset_y", "fov_origin_depth"):
+                                if req_key not in val and req_key in DEFAULT_PROJECTOR_DB[k]:
+                                    merged[req_key] = DEFAULT_PROJECTOR_DB[k][req_key]
+                            db[k] = merged
+                        elif isinstance(val, dict):
+                            db[k] = val
         except Exception as e:
             log.warning(f"Could not load custom projector database: {e}")
     return db
@@ -532,6 +635,9 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
         "chassis_height": 0.121,
         "chassis_depth": 0.277,
         "lens_offset_x": 0.0,
+        "lens_offset_y": 0.0,
+        "imager_diagonal_inch": 0.65,
+        "fov_origin_depth": 0.062,
         "display_type": "DLP",
         "contrast": "",
         "power_watts": 300,
@@ -598,9 +704,13 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
             if num:
                 data["lens_shift_h"] = float(num.group(1))
 
-    # 6. Technology & Contrast & Power
+    # 6. Technology & Imager Chip Size & Contrast & Power
     if "Display Type" in raw_specs:
-        data["display_type"] = raw_specs["Display Type"]
+        dt_str = raw_specs["Display Type"]
+        data["display_type"] = dt_str
+        m_chip = re.search(r"(\d+\.\d+)\s*[\"']", dt_str)
+        if m_chip:
+            data["imager_diagonal_inch"] = float(m_chip.group(1))
     if "Dynamic Contrast" in raw_specs:
         data["contrast"] = raw_specs["Dynamic Contrast"]
     elif "Contrast" in raw_specs:
@@ -626,6 +736,16 @@ def parse_projectorcentral_html(html: str, url: str) -> Dict[str, Any]:
                 data["chassis_width"] = round(float(m_cm[1]) * 0.01, 3)
                 data["chassis_depth"] = round(float(m_cm[2]) * 0.01, 3)
                 break
+
+    # 8. Evaluate physical FOV origin depth inside the chassis
+    ar_val = float(data["res_x"]) / float(data["res_y"]) if data["res_y"] else 16.0 / 9.0
+    d_fov_z, _, _, _ = evaluate_fov_origin_depth(
+        data["throw_ratio_default"],
+        data["chassis_depth"],
+        data["imager_diagonal_inch"],
+        ar_val,
+    )
+    data["fov_origin_depth"] = d_fov_z
 
     return data
 

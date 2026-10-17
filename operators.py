@@ -1,6 +1,7 @@
 import logging
 import bpy
 from bpy.types import Operator
+from mathutils import Vector
 
 from .helper import get_projector, get_projectors
 from . import projector_central
@@ -76,7 +77,7 @@ class PROJECTOR_OT_apply_pc_model(Operator):
         proj_settings.depth_max = model_data.get('throw_dist_max_m', 7.5)
         proj_settings.depth_optimal = round((proj_settings.depth_min + proj_settings.depth_max) / 2.0, 2)
 
-        # 7. Physical Chassis Dimensions & Lens Offset
+        # 7. Physical Chassis Dimensions, Internal FOV Origin & Lens Offsets
         if 'chassis_width' in model_data:
             proj_settings.chassis_width = model_data['chassis_width']
         if 'chassis_height' in model_data:
@@ -85,6 +86,12 @@ class PROJECTOR_OT_apply_pc_model(Operator):
             proj_settings.chassis_depth = model_data['chassis_depth']
         if 'lens_offset_x' in model_data:
             proj_settings.lens_offset_x = model_data['lens_offset_x']
+        if 'lens_offset_y' in model_data:
+            proj_settings.lens_offset_y = model_data['lens_offset_y']
+        if 'imager_diagonal_inch' in model_data:
+            proj_settings.imager_diagonal_inch = model_data['imager_diagonal_inch']
+        if 'fov_origin_depth' in model_data:
+            proj_settings.fov_origin_depth = model_data['fov_origin_depth']
 
         # Update all node and scene settings
         from .projector import update_projector_mesh
@@ -100,7 +107,7 @@ class PROJECTOR_OT_apply_pc_model(Operator):
 
 
 class PROJECTOR_OT_rebuild_mesh(Operator):
-    """ Rebuild the 3D projector physical model and mounting hardware. """
+    """ Rebuild the 3D projector chassis box, internal FOV origin, and installation centroid pivot. """
     bl_idname = 'projector.rebuild_mesh'
     bl_label = 'Rebuild 3D Model'
     bl_options = {'REGISTER', 'UNDO'}
@@ -113,7 +120,35 @@ class PROJECTOR_OT_rebuild_mesh(Operator):
         projector = get_projector(context)
         from .projector import update_projector_mesh
         update_projector_mesh(projector.proj_settings, context)
-        self.report({'INFO'}, "Rebuilt 3D projector physical model")
+        self.report({'INFO'}, "Rebuilt 3D projector chassis box & internal FOV origin")
+        return {'FINISHED'}
+
+
+class PROJECTOR_OT_snap_pivot_to_cursor(Operator):
+    """ Snap the projector's active installation point centroid (or internal FOV origin) to the 3D Cursor. """
+    bl_idname = 'projector.snap_pivot_to_cursor'
+    bl_label = 'Snap Installation Pivot to 3D Cursor'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_projector(context) is not None
+
+    def execute(self, context):
+        projector = get_projector(context)
+        proj_settings = projector.proj_settings
+        from .projector import update_projector_mesh
+        update_projector_mesh(proj_settings, context)
+
+        cursor_loc = Vector(context.scene.cursor.location)
+        use_pivot = proj_settings.pivot_at_installation and (proj_settings.mount_type != 'NONE')
+        if use_pivot and "installation_centroid_local" in projector:
+            p_inst = Vector(projector["installation_centroid_local"])
+            projector.location = cursor_loc - p_inst
+        else:
+            projector.location = cursor_loc
+
+        self.report({'INFO'}, "Snapped installation pivot centroid to 3D Cursor")
         return {'FINISHED'}
 
 
@@ -175,11 +210,13 @@ def register():
     bpy.utils.register_class(PROJECTOR_OT_switch_to_cycles)
     bpy.utils.register_class(PROJECTOR_OT_apply_pc_model)
     bpy.utils.register_class(PROJECTOR_OT_rebuild_mesh)
+    bpy.utils.register_class(PROJECTOR_OT_snap_pivot_to_cursor)
     bpy.utils.register_class(PROJECTOR_OT_download_pc_specs)
 
 
 def unregister():
     bpy.utils.unregister_class(PROJECTOR_OT_download_pc_specs)
+    bpy.utils.unregister_class(PROJECTOR_OT_snap_pivot_to_cursor)
     bpy.utils.unregister_class(PROJECTOR_OT_rebuild_mesh)
     bpy.utils.unregister_class(PROJECTOR_OT_apply_pc_model)
     bpy.utils.unregister_class(PROJECTOR_OT_switch_to_cycles)

@@ -18,6 +18,7 @@ class TestAddon(unittest.TestCase):
         self.assertTrue(hasattr(bpy.ops.projector, 'apply_pc_model'))
         self.assertTrue(hasattr(bpy.ops.projector, 'download_pc_specs'))
         self.assertTrue(hasattr(bpy.ops.projector, 'rebuild_mesh'))
+        self.assertTrue(hasattr(bpy.ops.projector, 'snap_pivot_to_cursor'))
 
 
 class TestProjector(unittest.TestCase):
@@ -245,18 +246,20 @@ class TestProjector(unittest.TestCase):
         self.assertAlmostEqual(data['throw_dist_max_m'], 6.10, places=2)
 
     def test_projector_3d_mesh_generation(self):
-        # 1. Check Projector.Visual child object
+        # 1. Check Projector.Visual child object and non-shadow-casting setup
         mesh_children = [ch for ch in self.c.children if ch.type == 'MESH']
         self.assertEqual(len(mesh_children), 1)
         body = mesh_children[0]
         self.assertTrue(body.name.endswith('.Visual'))
+        self.assertFalse(body.visible_shadow)
+        self.assertTrue(body.show_wire)
 
-        # 2. Check geometry exists
+        # 2. Check geometry exists (clean box + detailed internal FOV origin assembly)
         mesh_data = body.data
-        self.assertGreater(len(mesh_data.vertices), 500)
-        self.assertGreater(len(mesh_data.polygons), 300)
+        self.assertGreater(len(mesh_data.vertices), 200)
+        self.assertGreater(len(mesh_data.polygons), 100)
 
-        # 3. Check all 7 PBR materials assigned
+        # 3. Check all 7 materials assigned
         self.assertEqual(len(mesh_data.materials), 7)
         mat_names = [m.name for m in mesh_data.materials]
         self.assertTrue(any('Chassis' in n for n in mat_names))
@@ -264,29 +267,80 @@ class TestProjector(unittest.TestCase):
         self.assertIn('Projector_Lens_Glass', mat_names)
         self.assertIn('Projector_Mount_Metal', mat_names)
 
-        # 4. Check Optical Origin Alignment: Front exit pupil of lens is at local Z = 0
-        zs = [v.co.z for v in mesh_data.vertices]
-        self.assertAlmostEqual(min(zs), 0.0, places=3)
-        # All chassis body geometry sits behind the lens along +Z
-        self.assertGreater(max(zs), 0.25)
+        # 4. Verify Chassis Box is strictly a clean 6-face rectangular box with exact W x H x D measures
+        chassis_polys = [p for p in mesh_data.polygons if p.material_index == 0]
+        self.assertEqual(len(chassis_polys), 6)
+        chassis_vert_idxs = {vi for p in chassis_polys for vi in p.vertices}
+        self.assertEqual(len(chassis_vert_idxs), 8)
+        c_verts = [mesh_data.vertices[vi].co for vi in chassis_vert_idxs]
 
-    def test_projector_mounting_modes(self):
-        body = [ch for ch in self.c.children if ch.type == 'MESH'][0]
+        w_box = max(v.x for v in c_verts) - min(v.x for v in c_verts)
+        h_box = max(v.y for v in c_verts) - min(v.y for v in c_verts)
+        d_box = max(v.z for v in c_verts) - min(v.z for v in c_verts)
+        self.assertAlmostEqual(w_box, self.c.proj_settings.chassis_width, places=4)
+        self.assertAlmostEqual(h_box, self.c.proj_settings.chassis_height, places=4)
+        self.assertAlmostEqual(d_box, self.c.proj_settings.chassis_depth, places=4)
 
-        # Mode 1: Tabletop / Desktop
+        # 5. Verify Physical FOV Origin (0, 0, 0) is strictly INSIDE the chassis box!
+        z_front = min(v.z for v in c_verts)
+        z_rear = max(v.z for v in c_verts)
+        d_fov_z = self.c.proj_settings.fov_origin_depth
+        self.assertGreater(d_fov_z, 0.015)
+        self.assertAlmostEqual(z_front, -d_fov_z, places=4)
+        self.assertAlmostEqual(z_rear, self.c.proj_settings.chassis_depth - d_fov_z, places=4)
+        self.assertLess(z_front, 0.0)
+        self.assertGreater(z_rear, 0.0)
+        self.assertLess(min(v.x for v in c_verts), 0.0)
+        self.assertGreater(max(v.x for v in c_verts), 0.0)
+        self.assertLess(min(v.y for v in c_verts), 0.0)
+        self.assertGreater(max(v.y for v in c_verts), 0.0)
+
+    def test_installation_centroid_pivot_kinematics(self):
+        from mathutils import Vector
+
+        # Test across all support modes
+        for m_type in ('CEILING', 'TRUSS', 'TABLETOP'):
+            self.c.proj_settings.mount_type = m_type
+            self.c.proj_settings.pivot_at_installation = True
+            bpy.context.view_layer.update()
+
+            c = self.c.constraints.get('Installation_Centroid_Pivot')
+            self.assertIsNotNone(c)
+            self.assertFalse(c.mute)
+            self.assertEqual(c.rotation_range, 'ALWAYS_ACTIVE')
+
+            p_inst_local = Vector(self.c["installation_centroid_local"])
+            self.assertGreater(p_inst_local.length, 0.03)
+            self.assertAlmostEqual((Vector(c.offset) - p_inst_local).length, 0.0, places=5)
+
+            # Snap installation pivot to 3D cursor at (1.5, -2.0, 3.0)
+            bpy.context.scene.cursor.location = (1.5, -2.0, 3.0)
+            bpy.ops.projector.snap_pivot_to_cursor()
+            bpy.context.view_layer.update()
+
+            target_world_pivot = Vector((1.5, -2.0, 3.0))
+
+            # Rotate the projector through multiple 3D orientations:
+            # The installation point centroid in world space MUST remain invariant at target_world_pivot,
+            # while the internal FOV origin (matrix_world.translation) orbits around it!
+            for rot in [(0.0, 0.0, 0.0), (0.4, -0.3, 0.7), (-0.6, 0.5, -1.1)]:
+                self.c.rotation_euler = rot
+                bpy.context.view_layer.update()
+                world_pivot_now = self.c.matrix_world @ p_inst_local
+                world_fov_origin = self.c.matrix_world.translation
+                self.assertAlmostEqual((world_pivot_now - target_world_pivot).length, 0.0, places=4)
+                # Distance between world FOV origin and world installation pivot equals local lever arm length
+                self.assertAlmostEqual(
+                    (world_fov_origin - world_pivot_now).length,
+                    p_inst_local.length,
+                    places=4,
+                )
+
+        # When mount_type is NONE, pivot constraint is muted and rotation happens around internal FOV origin (0,0,0)
         self.c.proj_settings.mount_type = 'NONE'
-        count_none = len(body.data.vertices)
-        self.assertGreater(count_none, 500)
-
-        # Mode 2: Ceiling Mount
-        self.c.proj_settings.mount_type = 'CEILING'
-        count_ceiling = len(body.data.vertices)
-        self.assertGreater(count_ceiling, 500)
-
-        # Mode 3: Truss Clamp
-        self.c.proj_settings.mount_type = 'TRUSS'
-        count_truss = len(body.data.vertices)
-        self.assertGreater(count_truss, 500)
+        bpy.context.view_layer.update()
+        c = self.c.constraints.get('Installation_Centroid_Pivot')
+        self.assertTrue(c.mute)
 
     def test_projector_visibility_and_rebuild_operator(self):
         body = [ch for ch in self.c.children if ch.type == 'MESH'][0]

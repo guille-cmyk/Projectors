@@ -752,11 +752,47 @@ def ensure_projector_body(projector, context=None):
             context.scene.collection.objects.link(body)
         else:
             bpy.context.scene.collection.objects.link(body)
+
+    # Crucial because the physical FOV origin (and Projector.Spot light) is INSIDE the chassis box:
+    # Disable shadow casting on the visual chassis box so it never blocks Cycles projection rays.
+    body.visible_shadow = False
+    body.show_wire = True
+    body.show_all_edges = True
+    body.hide_select = True
     return body
 
 
+def update_installation_pivot_constraint(projector, proj_settings, p_inst):
+    """
+    Configure the Blender PIVOT constraint on the projector camera so that when a support
+    (CEILING, TRUSS, TABLETOP) is selected, the rotation pivot point for the FOV is placed
+    at the exact centroid of that installation point (p_inst).
+    """
+    if not projector:
+        return
+
+    projector["installation_centroid_local"] = (float(p_inst.x), float(p_inst.y), float(p_inst.z))
+    mount_type = getattr(proj_settings, 'mount_type', 'CEILING')
+    use_pivot = getattr(proj_settings, 'pivot_at_installation', True) and (mount_type != 'NONE')
+
+    c_name = "Installation_Centroid_Pivot"
+    c = projector.constraints.get(c_name)
+    if c is None:
+        c = projector.constraints.new(type='PIVOT')
+        c.name = c_name
+
+    c.target = None
+    c.rotation_range = 'ALWAYS_ACTIVE'
+    if use_pivot:
+        c.offset = (float(p_inst.x), float(p_inst.y), float(p_inst.z))
+        c.mute = False
+    else:
+        c.offset = (0.0, 0.0, 0.0)
+        c.mute = True
+
+
 def update_projector_mesh(proj_settings, context=None):
-    """Update or rebuild the procedural 3D physical chassis and mounting rig."""
+    """Update or rebuild the simple chassis box, internal FOV origin geometry, and installation centroid pivot."""
     projector = getattr(proj_settings, 'id_data', None)
     if not projector or getattr(projector, 'type', None) != 'CAMERA':
         projectors = get_projectors(context, only_selected=True) if context else []
@@ -769,30 +805,66 @@ def update_projector_mesh(proj_settings, context=None):
     body.hide_viewport = not show_body
     body.hide_render = not show_body
 
-    if not show_body:
-        return
-
     width = getattr(proj_settings, 'chassis_width', 0.380)
     height = getattr(proj_settings, 'chassis_height', 0.121)
     depth = getattr(proj_settings, 'chassis_depth', 0.277)
     lens_offset_x = getattr(proj_settings, 'lens_offset_x', 0.085)
+    lens_offset_y = getattr(proj_settings, 'lens_offset_y', 0.012)
+    imager_diag = getattr(proj_settings, 'imager_diagonal_inch', 0.65)
+    throw_ratio = getattr(proj_settings, 'throw_ratio', 1.325) or 1.325
+    h_shift = getattr(proj_settings, 'h_shift', 0.0)
+    v_shift = getattr(proj_settings, 'v_shift', 0.0)
     mount_type = getattr(proj_settings, 'mount_type', 'CEILING')
     pole_length = getattr(proj_settings, 'mount_pole_length', 0.40)
     chassis_color = getattr(proj_settings, 'chassis_color', 'WHITE')
     inverted = getattr(proj_settings, 'mount_inverted', True)
 
+    res_w, res_h = get_resolution(proj_settings, context)
+    aspect_ratio = (res_w / res_h) if res_h > 0 else (16.0 / 9.0)
+
+    # Evaluate physical FOV origin depth inside the chassis when auto_fov_origin is enabled
+    if getattr(proj_settings, 'auto_fov_origin', True):
+        d_fov_z, _, _, _ = projector_central.evaluate_fov_origin_depth(
+            throw_ratio, depth, imager_diag, aspect_ratio
+        )
+        proj_settings['fov_origin_depth'] = d_fov_z
+    else:
+        d_fov_z = getattr(proj_settings, 'fov_origin_depth', 0.062)
+
     from . import projector_mesh
-    projector_mesh.build_projector_mesh(
-        mesh_obj=body,
-        width=width,
-        height=height,
-        depth=depth,
-        lens_offset_x=lens_offset_x,
-        mount_type=mount_type,
-        mount_pole_length=pole_length,
-        chassis_color=chassis_color,
-        inverted=inverted
-    )
+    if show_body:
+        p_inst = projector_mesh.build_projector_mesh(
+            mesh_obj=body,
+            width=width,
+            height=height,
+            depth=depth,
+            lens_offset_x=lens_offset_x,
+            lens_offset_y=lens_offset_y,
+            fov_origin_depth=d_fov_z,
+            imager_diagonal_inch=imager_diag,
+            throw_ratio=throw_ratio,
+            aspect_ratio=aspect_ratio,
+            h_shift_pct=h_shift,
+            v_shift_pct=v_shift,
+            mount_type=mount_type,
+            mount_pole_length=pole_length,
+            chassis_color=chassis_color,
+            inverted=inverted,
+        )
+    else:
+        p_inst = projector_mesh.compute_installation_centroid(
+            width=width,
+            height=height,
+            depth=depth,
+            lens_offset_x=lens_offset_x,
+            lens_offset_y=lens_offset_y,
+            fov_origin_depth=d_fov_z,
+            mount_type=mount_type,
+            mount_pole_length=pole_length,
+            inverted=inverted,
+        )
+
+    update_installation_pivot_constraint(projector, proj_settings, p_inst)
 
 
 def get_resolution(proj_settings, context):
@@ -888,6 +960,9 @@ def update_lens_shift(proj_settings, context):
         else:
             nodes['Mapping.001'].inputs[1].default_value[0] = h_shift / throw_ratio
             nodes['Mapping.001'].inputs[1].default_value[1] = v_shift / throw_ratio * inverted_aspect_ratio
+
+    # Rebuild internal FOV frustum inside the chassis box when throw_ratio or lens shift updates
+    update_projector_mesh(proj_settings, context)
 
 
 def update_resolution(proj_settings, context):
@@ -1151,16 +1226,21 @@ def init_projector(proj_settings, context):
     proj_settings.depth_constant_brightness = True
     proj_settings.depth_zero_gradient = True
 
-    # 3D Physical Model & Rigging defaults
+    # 3D Physical Model, Internal FOV Origin & Installation Pivot defaults
     proj_settings.show_projector_body = True
     proj_settings.chassis_color = 'WHITE'
     proj_settings.chassis_width = 0.380
     proj_settings.chassis_height = 0.121
     proj_settings.chassis_depth = 0.277
     proj_settings.lens_offset_x = 0.085
+    proj_settings.lens_offset_y = 0.012
+    proj_settings.imager_diagonal_inch = 0.65
+    proj_settings.auto_fov_origin = True
+    proj_settings.fov_origin_depth = 0.062
     proj_settings.mount_type = 'CEILING'
     proj_settings.mount_pole_length = 0.40
     proj_settings.mount_inverted = True
+    proj_settings.pivot_at_installation = True
 
     # ProjectorCentral defaults
     try:
@@ -1255,7 +1335,6 @@ class PROJECTOR_OT_delete_projector(Operator):
             bpy.data.objects.remove(projector, do_unlink=True)
             if isinstance(cam_data, bpy.types.Camera):
                 bpy.data.cameras.remove(cam_data)
-        return {'FINISHED'}
         return {'FINISHED'}
 
 
@@ -1434,20 +1513,20 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         name="Contrast",
         default="15,000:1")
 
-    # 3D Physical Chassis & Rigging Properties
+    # 3D Physical Chassis Box, Internal FOV Origin & Installation Pivot Properties
     show_projector_body: bpy.props.BoolProperty(
         name="Show 3D Projector",
-        description="Display 3D projector chassis, lens assembly, and mounting hardware",
+        description="Display accurate chassis box, internal FOV origin geometry, and installation support",
         default=True,
         update=update_projector_mesh)
     chassis_color: bpy.props.EnumProperty(
         name="Chassis Color",
         items=[
-            ('WHITE', 'White', 'Matte white chassis body', 0),
-            ('BLACK', 'Black / Charcoal', 'Dark charcoal / black chassis body', 1)
+            ('WHITE', 'White', 'Translucent white chassis box', 0),
+            ('BLACK', 'Black / Charcoal', 'Translucent charcoal / black chassis box', 1)
         ],
         default='WHITE',
-        description="Finish color of the projector outer housing",
+        description="Color of the accurate chassis bounding box",
         update=update_projector_mesh)
     chassis_width: bpy.props.FloatProperty(
         name="Width",
@@ -1475,21 +1554,50 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         update=update_projector_mesh)
     lens_offset_x: bpy.props.FloatProperty(
         name="Lens Offset X",
-        description="Horizontal lens offset from projector body center (positive = right offset)",
+        description="Horizontal offset of the internal FOV origin from the chassis center (positive = right offset)",
         default=0.085,
         min=-0.8,
         soft_max=0.8,
         unit='LENGTH',
         update=update_projector_mesh)
+    lens_offset_y: bpy.props.FloatProperty(
+        name="Lens Offset Y",
+        description="Vertical offset of the internal FOV origin from the chassis center",
+        default=0.012,
+        min=-0.4,
+        soft_max=0.4,
+        unit='LENGTH',
+        update=update_projector_mesh)
+    imager_diagonal_inch: bpy.props.FloatProperty(
+        name="Imager Diagonal (in)",
+        description="Diagonal size of the internal DMD / 3LCD / LCoS imager chip in inches (e.g. 0.47, 0.65, 0.74, 0.96)",
+        default=0.65,
+        min=0.20,
+        soft_max=2.0,
+        update=update_projector_mesh)
+    auto_fov_origin: bpy.props.BoolProperty(
+        name="Auto-Evaluate Internal FOV Origin",
+        description="Automatically evaluate the physical FOV origin depth inside the chassis from throw ratio, imager chip size, and chassis depth",
+        default=True,
+        update=update_projector_mesh)
+    fov_origin_depth: bpy.props.FloatProperty(
+        name="FOV Origin Depth Inside Chassis",
+        description="Distance from the front chassis face inward (+Z) to the physical FOV origin nodal point at local (0, 0, 0)",
+        default=0.062,
+        min=0.008,
+        soft_max=0.60,
+        unit='LENGTH',
+        update=update_projector_mesh)
     mount_type: bpy.props.EnumProperty(
-        name="Mount Type",
+        name="Installation Support",
         items=[
-            ('NONE', 'Tabletop (Rubber Feet)', 'Adjustable knurled rubber leveling feet on underside', 0),
-            ('CEILING', 'Ceiling Mount (Spider & Pole)', 'Universal spider arms, gimbal, drop pipe, and ceiling flange', 1),
-            ('TRUSS', 'Truss Clamp (Half-Coupler & Safety)', 'Theatrical 50mm half-coupler clamp and aircraft steel safety cable', 2)
+            ('NONE', 'None (Bare Chassis Box)', 'No support hardware; FOV pivot remains at the internal FOV origin (0, 0, 0)', 0),
+            ('TABLETOP', 'Tabletop Support (Feet Centroid Pivot)', '4 leveling support pads; FOV pivot at centroid of tabletop support plane', 1),
+            ('CEILING', 'Ceiling Mount (Ceiling Plate Centroid Pivot)', 'Ceiling drop mount; FOV pivot at centroid of ceiling installation plate', 2),
+            ('TRUSS', 'Truss Clamp (Truss Pipe Centroid Pivot)', '50mm truss coupler clamp; FOV pivot at centroid of truss installation point', 3)
         ],
         default='CEILING',
-        description="Mounting system and hardware attached to underside mounting points",
+        description="Select installation support; sets the FOV rotation pivot point to the centroid of that installation point",
         update=update_projector_mesh)
     mount_pole_length: bpy.props.FloatProperty(
         name="Drop Pole Length",
@@ -1501,7 +1609,12 @@ class ProjectorSettings(bpy.types.PropertyGroup):
         update=update_projector_mesh)
     mount_inverted: bpy.props.BoolProperty(
         name="Invert Projector",
-        description="Mount projector inverted (upside down) so underside holes face ceiling/truss (standard practice)",
+        description="Mount projector inverted (upside down) so underside faces ceiling/truss",
+        default=True,
+        update=update_projector_mesh)
+    pivot_at_installation: bpy.props.BoolProperty(
+        name="Pivot FOV at Installation Centroid",
+        description="Place the projector FOV rotation pivot point at the exact centroid of the selected installation support point",
         default=True,
         update=update_projector_mesh)
 
