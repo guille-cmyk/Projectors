@@ -251,6 +251,8 @@ class TestProjector(unittest.TestCase):
         self.assertAlmostEqual(data['throw_dist_max_m'], 6.10, places=2)
 
     def test_projector_3d_mesh_generation(self):
+        from mathutils import Vector
+
         # 1. Check Projector.Visual child object and non-shadow-casting setup
         mesh_children = [ch for ch in self.c.children if ch.type == 'MESH']
         self.assertEqual(len(mesh_children), 1)
@@ -259,27 +261,30 @@ class TestProjector(unittest.TestCase):
         self.assertFalse(body.visible_shadow)
         self.assertTrue(body.show_wire)
 
-        # 2. Check ultra-lightweight memory-cheap geometry:
-        # strictly 6 polygons (the bounding box) and 8..12 vertices (8 box verts + 1D mount line)
+        # 2. Check simple bounding box view for BOTH projector and mounting system:
+        # When mounted (CEILING, TRUSS, TABLETOP): 2 simple boxes = 16 vertices, 12 quad faces
         mesh_data = body.data
-        self.assertEqual(len(mesh_data.polygons), 6)
-        # Default mount_type is 'CEILING' -> 8 box verts + 2 line verts = 10 verts, 12 box edges + 1 mount edge = 13 edges
-        self.assertEqual(len(mesh_data.vertices), 10)
-        self.assertEqual(len(mesh_data.edges), 13)
+        for m_type in ('CEILING', 'TRUSS', 'TABLETOP'):
+            self.c.proj_settings.mount_type = m_type
+            self.assertEqual(len(mesh_data.polygons), 12)
+            self.assertEqual(len(mesh_data.vertices), 16)
+            self.assertEqual(len(mesh_data.edges), 24)
 
-        # Check TRUSS mount -> 8 box verts + 4 line verts (stem + horizontal truss axis) = 12 verts, 14 edges
-        self.c.proj_settings.mount_type = 'TRUSS'
-        self.assertEqual(len(mesh_data.polygons), 6)
-        self.assertEqual(len(mesh_data.vertices), 12)
-        self.assertEqual(len(mesh_data.edges), 14)
+            # Verify local (0, 0, 0) is at the END of the mounting system in the attachment point!
+            att_local = Vector(self.c["attachment_point_local"])
+            self.assertAlmostEqual(att_local.length, 0.0, places=5)
 
-        # Check TABLETOP mount -> 8 box verts + 2 line verts = 10 verts, 13 edges
-        self.c.proj_settings.mount_type = 'TABLETOP'
-        self.assertEqual(len(mesh_data.polygons), 6)
-        self.assertEqual(len(mesh_data.vertices), 10)
-        self.assertEqual(len(mesh_data.edges), 13)
+            # Mount box is vertices 8..15; its attachment end face must lie at y = 0.0
+            m_verts = [mesh_data.vertices[i].co for i in range(8, 16)]
+            if m_type in ('CEILING', 'TRUSS'):
+                self.assertAlmostEqual(max(v.y for v in m_verts), 0.0, places=5)
+            else:  # TABLETOP
+                self.assertAlmostEqual(min(v.y for v in m_verts), 0.0, places=5)
+            # And the mount box X/Z center is at (0, 0)
+            self.assertAlmostEqual((min(v.x for v in m_verts) + max(v.x for v in m_verts)) / 2.0, 0.0, places=5)
+            self.assertAlmostEqual((min(v.z for v in m_verts) + max(v.z for v in m_verts)) / 2.0, 0.0, places=5)
 
-        # Check NONE mount -> strictly 8 vertices, 12 edges, 6 polygons
+        # Check NONE mount -> strictly 1 box (8 vertices, 12 edges, 6 quad faces)
         self.c.proj_settings.mount_type = 'NONE'
         self.assertEqual(len(mesh_data.polygons), 6)
         self.assertEqual(len(mesh_data.vertices), 8)
@@ -292,13 +297,8 @@ class TestProjector(unittest.TestCase):
         self.assertEqual(len(mesh_data.materials), 1)
         self.assertTrue(mesh_data.materials[0].name.startswith('Projector_Box_'))
 
-        # 4. Verify Chassis Box is strictly a clean 6-face rectangular box with exact W x H x D measures
-        chassis_polys = list(mesh_data.polygons)
-        self.assertEqual(len(chassis_polys), 6)
-        chassis_vert_idxs = {vi for p in chassis_polys for vi in p.vertices}
-        self.assertEqual(len(chassis_vert_idxs), 8)
-        c_verts = [mesh_data.vertices[vi].co for vi in chassis_vert_idxs]
-
+        # 4. Verify Chassis Box (vertices 0..7) is a clean 6-face rectangular box with exact W x H x D measures
+        c_verts = [mesh_data.vertices[vi].co for vi in range(8)]
         w_box = max(v.x for v in c_verts) - min(v.x for v in c_verts)
         h_box = max(v.y for v in c_verts) - min(v.y for v in c_verts)
         d_box = max(v.z for v in c_verts) - min(v.z for v in c_verts)
@@ -306,19 +306,22 @@ class TestProjector(unittest.TestCase):
         self.assertAlmostEqual(h_box, self.c.proj_settings.chassis_height, places=4)
         self.assertAlmostEqual(d_box, self.c.proj_settings.chassis_depth, places=4)
 
-        # 5. Verify Physical FOV Origin (0, 0, 0) is strictly INSIDE the chassis box!
+        # 5. Verify Physical FOV Origin (and Projector.Spot.location) is strictly INSIDE the chassis box!
+        fov_local = Vector(self.c["fov_origin_local"])
+        self.assertAlmostEqual((Vector(self.s.location) - fov_local).length, 0.0, places=5)
+
         z_front = min(v.z for v in c_verts)
         z_rear = max(v.z for v in c_verts)
         d_fov_z = self.c.proj_settings.fov_origin_depth
         self.assertGreater(d_fov_z, 0.015)
-        self.assertAlmostEqual(z_front, -d_fov_z, places=4)
-        self.assertAlmostEqual(z_rear, self.c.proj_settings.chassis_depth - d_fov_z, places=4)
-        self.assertLess(z_front, 0.0)
-        self.assertGreater(z_rear, 0.0)
-        self.assertLess(min(v.x for v in c_verts), 0.0)
-        self.assertGreater(max(v.x for v in c_verts), 0.0)
-        self.assertLess(min(v.y for v in c_verts), 0.0)
-        self.assertGreater(max(v.y for v in c_verts), 0.0)
+        self.assertAlmostEqual(z_front, fov_local.z - d_fov_z, places=4)
+        self.assertAlmostEqual(z_rear, fov_local.z + self.c.proj_settings.chassis_depth - d_fov_z, places=4)
+        self.assertLess(min(v.x for v in c_verts), fov_local.x)
+        self.assertGreater(max(v.x for v in c_verts), fov_local.x)
+        self.assertLess(min(v.y for v in c_verts), fov_local.y)
+        self.assertGreater(max(v.y for v in c_verts), fov_local.y)
+        self.assertLess(z_front, fov_local.z)
+        self.assertGreater(z_rear, fov_local.z)
 
     def test_texture_interpolation_point_cubic(self):
         # Default must be 'Closest' (Point filtering) so individual pixels are visible
@@ -344,22 +347,22 @@ class TestProjector(unittest.TestCase):
     def test_installation_centroid_pivot_kinematics(self):
         from mathutils import Vector
 
-        # Test across all support modes
+        # Test across all mounting systems: origin/pivot (0, 0, 0) is at the END of the mounting system
         for m_type in ('CEILING', 'TRUSS', 'TABLETOP'):
             self.c.proj_settings.mount_type = m_type
             self.c.proj_settings.pivot_at_installation = True
             bpy.context.view_layer.update()
 
-            c = self.c.constraints.get('Installation_Centroid_Pivot')
-            self.assertIsNotNone(c)
-            self.assertFalse(c.mute)
-            self.assertEqual(c.rotation_range, 'ALWAYS_ACTIVE')
+            att_local = Vector(self.c["attachment_point_local"])
+            fov_local = Vector(self.c["fov_origin_local"])
+            p_inst_rel_fov = Vector(self.c["installation_centroid_local"])
 
-            p_inst_local = Vector(self.c["installation_centroid_local"])
-            self.assertGreater(p_inst_local.length, 0.03)
-            self.assertAlmostEqual((Vector(c.offset) - p_inst_local).length, 0.0, places=5)
+            # Origin (0,0,0) IS the attachment point at the end of the mount!
+            self.assertAlmostEqual(att_local.length, 0.0, places=5)
+            self.assertGreater(fov_local.length, 0.02)
+            self.assertAlmostEqual((fov_local + p_inst_rel_fov).length, 0.0, places=5)
 
-            # Snap installation pivot to 3D cursor at (1.5, -2.0, 3.0)
+            # Snap attachment pivot to 3D cursor at (1.5, -2.0, 3.0)
             bpy.context.scene.cursor.location = (1.5, -2.0, 3.0)
             bpy.ops.projector.snap_pivot_to_cursor()
             bpy.context.view_layer.update()
@@ -367,26 +370,68 @@ class TestProjector(unittest.TestCase):
             target_world_pivot = Vector((1.5, -2.0, 3.0))
 
             # Rotate the projector through multiple 3D orientations:
-            # The installation point centroid in world space MUST remain invariant at target_world_pivot,
-            # while the internal FOV origin (matrix_world.translation) orbits around it!
+            # The attachment point in world space MUST remain invariant at target_world_pivot,
+            # while the internal FOV origin (spot.matrix_world.translation) orbits around it!
             for rot in [(0.0, 0.0, 0.0), (0.4, -0.3, 0.7), (-0.6, 0.5, -1.1)]:
                 self.c.rotation_euler = rot
                 bpy.context.view_layer.update()
-                world_pivot_now = self.c.matrix_world @ p_inst_local
-                world_fov_origin = self.c.matrix_world.translation
-                self.assertAlmostEqual((world_pivot_now - target_world_pivot).length, 0.0, places=4)
-                # Distance between world FOV origin and world installation pivot equals local lever arm length
+                world_attach_now = self.c.matrix_world @ att_local
+                world_fov_origin = self.s.matrix_world.translation
+                self.assertAlmostEqual((world_attach_now - target_world_pivot).length, 0.0, places=4)
                 self.assertAlmostEqual(
-                    (world_fov_origin - world_pivot_now).length,
-                    p_inst_local.length,
+                    (world_fov_origin - world_attach_now).length,
+                    fov_local.length,
                     places=4,
                 )
 
-        # When mount_type is NONE, pivot constraint is muted and rotation happens around internal FOV origin (0,0,0)
+        # When mount_type is NONE, origin (0,0,0) is directly at the internal FOV origin
         self.c.proj_settings.mount_type = 'NONE'
         bpy.context.view_layer.update()
-        c = self.c.constraints.get('Installation_Centroid_Pivot')
-        self.assertTrue(c.mute)
+        self.assertAlmostEqual(Vector(self.c["fov_origin_local"]).length, 0.0, places=5)
+        self.assertAlmostEqual(Vector(self.s.location).length, 0.0, places=5)
+
+    def test_sverchok_parametric_nodes(self):
+        from mathutils import Vector
+
+        # 1. Verify operator creates Sverchok node tree with SvProjectorSpecsNode and SvProjectorParametricNode
+        res = bpy.ops.projector.create_sverchok_rig()
+        self.assertEqual(res, {'FINISHED'})
+        tree = bpy.data.node_groups.get("Projector_Parametric_Rig")
+        self.assertIsNotNone(tree)
+
+        n_specs = tree.nodes.get("Projector Specs & Model DB")
+        n_rig = tree.nodes.get("Projector Parametric Rig")
+        self.assertIsNotNone(n_specs)
+        self.assertIsNotNone(n_rig)
+
+        # 2. Configure specs node for Epson 5050UB on TRUSS mount and process
+        n_specs.pc_brand = 'Epson'
+        n_specs.pc_model = 'epson-home_cinema_5050ub'
+        n_specs.mount_type = 'TRUSS'
+        n_specs.texture_interpolation = 'Closest'
+        n_specs.process()
+
+        # 3. Feed a parametric attachment point (2.0, -4.0, 3.5) and target point (2.0, 0.0, 1.2)
+        n_rig.inputs['Attachment Point'].sv_set([[(2.0, -4.0, 3.5)]])
+        n_rig.inputs['Target Point'].sv_set([[(2.0, 0.0, 1.2)]])
+        n_rig.use_target_aim = True
+        n_rig.process()
+        bpy.context.view_layer.update()
+
+        sv_proj = bpy.data.objects.get("Projector_SV")
+        self.assertIsNotNone(sv_proj)
+        self.assertEqual(sv_proj.proj_settings.mount_type, 'TRUSS')
+        self.assertAlmostEqual(sv_proj.proj_settings.chassis_width, 0.520, places=3)
+
+        # Verify the projector's origin (the end of the truss mount attachment point) is at (2.0, -4.0, 3.5)
+        self.assertAlmostEqual((sv_proj.matrix_world.translation - Vector((2.0, -4.0, 3.5))).length, 0.0, places=4)
+
+        # Clean up Projector_SV
+        bpy.ops.object.select_all(action='DESELECT')
+        sv_proj.select_set(True)
+        bpy.context.view_layer.objects.active = sv_proj
+        bpy.ops.projector.delete()
+        bpy.data.node_groups.remove(tree)
 
     def test_projector_visibility_and_rebuild_operator(self):
         body = [ch for ch in self.c.children if ch.type == 'MESH'][0]
@@ -407,8 +452,10 @@ class TestProjector(unittest.TestCase):
 
     def tearDown(self):
         bpy.ops.object.select_all(action='DESELECT')
-        self.c.select_set(True)
-        bpy.ops.projector.delete()
+        if self.c and self.c.name in bpy.data.objects:
+            self.c.select_set(True)
+            bpy.context.view_layer.objects.active = self.c
+            bpy.ops.projector.delete()
 
 
 def run_tests():

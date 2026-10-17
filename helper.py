@@ -26,7 +26,11 @@ def get_projectors(context, only_selected=False):
     objs = context.selected_objects if only_selected else context.scene.objects
     projectors = []
     for obj in objs:
-        if obj.type == 'CAMERA' and obj.name.startswith('Projector'):
+        is_proj = obj.type == 'CAMERA' and (
+            obj.name.startswith('Projector')
+            or any(ADDON_ID.format('spot') in ch for ch in obj.children)
+        )
+        if is_proj:
             if only_selected:
                 if obj.select_get():
                     projectors.append(obj)

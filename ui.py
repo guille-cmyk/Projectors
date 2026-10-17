@@ -187,15 +187,15 @@ class PROJECTOR_PT_rigging(Panel):
         tel_col.label(text=f"Front Face Z: {z_front*1000:.1f} mm | Rear Z: +{z_rear*1000:.1f} mm")
         tel_col.label(text=f"Focal Length: {f_eff*1000:.2f} mm ({s_w*1000:.1f}×{s_h*1000:.1f} mm chip)")
 
-        # 3. Installation Support Line & Centroid Pivot Point
+        # 3. Mounting System Bounding Box & Attachment Point Origin/Pivot
         mount_box = layout.box()
-        mount_box.label(text="Mounting Line & Centroid Pivot", icon="PIVOT_CURSOR")
-        mount_box.prop(proj_settings, 'mount_type', text="Mount Line")
+        mount_box.label(text="Mounting Box & Attachment Pivot", icon="PIVOT_CURSOR")
+        mount_box.prop(proj_settings, 'mount_type', text="Mount Box")
         if proj_settings.mount_type != 'NONE':
-            mount_box.prop(proj_settings, 'pivot_at_installation', text="Pivot at Mount Centroid")
+            mount_box.prop(proj_settings, 'pivot_at_installation', text="Origin at Attachment End")
             if proj_settings.mount_type == 'CEILING':
                 col = mount_box.column(align=True)
-                col.prop(proj_settings, 'mount_pole_length', text="Drop Line")
+                col.prop(proj_settings, 'mount_pole_length', text="Mount Length")
                 col.prop(proj_settings, 'mount_inverted', text="Invert Projector")
             elif proj_settings.mount_type == 'TRUSS':
                 mount_box.prop(proj_settings, 'mount_inverted', text="Invert Projector")
@@ -205,12 +205,18 @@ class PROJECTOR_PT_rigging(Panel):
                 lever_mm = ((px * px + py * py + pz * pz) ** 0.5) * 1000.0
                 piv_col = mount_box.column(align=True)
                 piv_col.scale_y = 0.82
-                piv_col.label(text=f"Pivot Centroid: ({px*1000:.1f}, {py*1000:.1f}, {pz*1000:.1f}) mm", icon="EMPTY_AXIS")
-                piv_col.label(text=f"Pivot → FOV Lever Arm: {lever_mm:.1f} mm")
+                piv_col.label(text="Attachment Pivot: Local (0, 0, 0) mm", icon="EMPTY_AXIS")
+                piv_col.label(text=f"FOV Origin Offset: ({-px*1000:.1f}, {-py*1000:.1f}, {-pz*1000:.1f}) mm")
+                piv_col.label(text=f"Attachment → FOV Lever Arm: {lever_mm:.1f} mm")
 
-            mount_box.operator('projector.snap_pivot_to_cursor', text="Snap Mount Pivot to 3D Cursor", icon="CURSOR")
+            mount_box.operator('projector.snap_pivot_to_cursor', text="Snap Attachment Pivot to 3D Cursor", icon="CURSOR")
 
-        layout.operator('projector.rebuild_mesh', text="Refresh Bounding Box & Pivot", icon="FILE_REFRESH")
+        # 4. Sverchok Parametric Positioning
+        sv_box = layout.box()
+        sv_box.label(text="Sverchok Parametric Positioning", icon="NODETREE")
+        sv_box.operator('projector.create_sverchok_rig', text="Create Sverchok Projector Tree", icon="ADD")
+
+        layout.operator('projector.rebuild_mesh', text="Refresh Bounding Boxes & Pivot", icon="FILE_REFRESH")
 
 
 class PROJECTOR_PT_projected_color(Panel):

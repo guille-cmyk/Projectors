@@ -770,37 +770,54 @@ def ensure_projector_body(projector, context=None):
     return body
 
 
-def update_installation_pivot_constraint(projector, proj_settings, p_inst):
+def update_installation_pivot_constraint(projector, proj_settings, mesh_info):
     """
-    Configure the Blender PIVOT constraint on the projector camera so that when a support
-    (CEILING, TRUSS, TABLETOP) is selected, the rotation pivot point for the FOV is placed
-    at the exact centroid of that installation point (p_inst).
+    Configure the projector origin & child Spot Light offset so that when a mounting system
+    (CEILING, TRUSS, TABLETOP) is selected, the object's origin/pivot point (0, 0, 0) sits
+    directly at the END of the mounting system in the attachment point, while the physical
+    FOV origin (and Projector.Spot light) sits inside the projector chassis bounding box.
     """
     if not projector:
         return
 
-    projector["installation_centroid_local"] = (float(p_inst.x), float(p_inst.y), float(p_inst.z))
-    mount_type = getattr(proj_settings, 'mount_type', 'CEILING')
-    use_pivot = getattr(proj_settings, 'pivot_at_installation', True) and (mount_type != 'NONE')
+    fov_origin_local = mesh_info["fov_origin_local"]
+    attachment_point_local = mesh_info["attachment_point_local"]
+    p_attach_rel_fov = mesh_info["p_attach_rel_fov"]
 
+    projector["fov_origin_local"] = (
+        float(fov_origin_local.x),
+        float(fov_origin_local.y),
+        float(fov_origin_local.z),
+    )
+    projector["attachment_point_local"] = (
+        float(attachment_point_local.x),
+        float(attachment_point_local.y),
+        float(attachment_point_local.z),
+    )
+    projector["installation_centroid_local"] = (
+        float(p_attach_rel_fov.x),
+        float(p_attach_rel_fov.y),
+        float(p_attach_rel_fov.z),
+    )
+
+    # Position the child Spot Light at the exact internal FOV origin inside the chassis bounding box
+    spot = get_projector_spot(projector)
+    if spot:
+        spot.location = (
+            float(fov_origin_local.x),
+            float(fov_origin_local.y),
+            float(fov_origin_local.z),
+        )
+
+    # Remove any legacy offset PIVOT constraint since local (0, 0, 0) is now directly at the attachment point
     c_name = "Installation_Centroid_Pivot"
     c = projector.constraints.get(c_name)
-    if c is None:
-        c = projector.constraints.new(type='PIVOT')
-        c.name = c_name
-
-    c.target = None
-    c.rotation_range = 'ALWAYS_ACTIVE'
-    if use_pivot:
-        c.offset = (float(p_inst.x), float(p_inst.y), float(p_inst.z))
-        c.mute = False
-    else:
-        c.offset = (0.0, 0.0, 0.0)
-        c.mute = True
+    if c is not None:
+        projector.constraints.remove(c)
 
 
 def update_projector_mesh(proj_settings, context=None):
-    """Update or rebuild the simple chassis box, internal FOV origin geometry, and installation centroid pivot."""
+    """Update or rebuild the simple bounding boxes for the projector and mounting system."""
     projector = getattr(proj_settings, 'id_data', None)
     if not projector or getattr(projector, 'type', None) != 'CAMERA':
         projectors = get_projectors(context, only_selected=True) if context else []
@@ -827,6 +844,7 @@ def update_projector_mesh(proj_settings, context=None):
     pole_length = getattr(proj_settings, 'mount_pole_length', 0.40)
     chassis_color = getattr(proj_settings, 'chassis_color', 'WHITE')
     inverted = getattr(proj_settings, 'mount_inverted', True)
+    pivot_at_inst = getattr(proj_settings, 'pivot_at_installation', True)
 
     res_w, res_h = get_resolution(proj_settings, context)
     aspect_ratio = (res_w / res_h) if res_h > 0 else (16.0 / 9.0)
@@ -842,7 +860,7 @@ def update_projector_mesh(proj_settings, context=None):
 
     from . import projector_mesh
     if show_body:
-        p_inst = projector_mesh.build_projector_mesh(
+        mesh_info = projector_mesh.build_projector_mesh(
             mesh_obj=body,
             width=width,
             height=height,
@@ -859,9 +877,10 @@ def update_projector_mesh(proj_settings, context=None):
             mount_pole_length=pole_length,
             chassis_color=chassis_color,
             inverted=inverted,
+            pivot_at_installation=pivot_at_inst,
         )
     else:
-        p_inst = projector_mesh.compute_installation_centroid(
+        mesh_info = projector_mesh.generate_projector_bounding_boxes_data(
             width=width,
             height=height,
             depth=depth,
@@ -871,9 +890,10 @@ def update_projector_mesh(proj_settings, context=None):
             mount_type=mount_type,
             mount_pole_length=pole_length,
             inverted=inverted,
+            pivot_at_installation=pivot_at_inst,
         )
 
-    update_installation_pivot_constraint(projector, proj_settings, p_inst)
+    update_installation_pivot_constraint(projector, proj_settings, mesh_info)
 
 
 def get_resolution(proj_settings, context):

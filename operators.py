@@ -144,14 +144,12 @@ class PROJECTOR_OT_snap_pivot_to_cursor(Operator):
         update_projector_mesh(proj_settings, context)
 
         cursor_loc = Vector(context.scene.cursor.location)
-        use_pivot = proj_settings.pivot_at_installation and (proj_settings.mount_type != 'NONE')
-        if use_pivot and "installation_centroid_local" in projector:
-            p_inst = Vector(projector["installation_centroid_local"])
-            projector.location = cursor_loc - p_inst
-        else:
-            projector.location = cursor_loc
+        # Since local (0, 0, 0) is at the attachment point at the end of the mounting system
+        # when a mount is selected, snapping the pivot to the 3D cursor places projector.location at cursor_loc!
+        attach_local = Vector(projector.get("attachment_point_local", (0.0, 0.0, 0.0)))
+        projector.location = cursor_loc - (projector.matrix_world.to_3x3() @ attach_local)
 
-        self.report({'INFO'}, "Snapped installation pivot centroid to 3D Cursor")
+        self.report({'INFO'}, "Snapped attachment pivot point to 3D Cursor")
         return {'FINISHED'}
 
 

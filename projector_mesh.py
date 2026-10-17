@@ -1,21 +1,28 @@
 """
-Ultra-Lightweight Procedural 3D Mesh Generator for Projectors.
-Generates ONLY:
-1. The exact 8-vertex, 6-face Bounding Box of the projector chassis (width x height x depth),
-   positioned so local (0, 0, 0) sits at the manufacturer-manual-evaluated physical FOV origin
-   inside the bounding box.
-2. A minimal 1D wire line (edge) signaling the mounting system and its installation centroid P_inst,
-   keeping memory footprint near zero (8-12 vertices, 6 faces, 1 shared material).
+Ultra-Lightweight Bounding Box Generator for Projectors & Mounting Systems.
+Generates ONLY simple rectangular bounding boxes:
+1. Projector Chassis Bounding Box (8 vertices, 6 quad faces) with manufacturer user manual
+   measures (width x height x depth).
+2. Mounting System Bounding Box (8 vertices, 6 quad faces when a mount is selected) extending
+   from the chassis mounting surface to the attachment point at the end of the mount.
+
+Coordinate & Origin Convention:
+- When a mounting system is selected (and pivot_at_installation is True), local (0, 0, 0)
+  is placed at the END of the mounting system in the attachment point, while the physical
+  internal FOV origin (and Projector.Spot light) sits at V_fov_local = -P_attach_rel_fov
+  strictly inside the projector chassis bounding box.
+- When mount_type == 'NONE' (or pivot_at_installation is False), local (0, 0, 0) is placed
+  directly at the physical internal FOV origin inside the projector chassis bounding box.
 """
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 import bpy
 import bmesh
 from mathutils import Vector
 
 
 def get_or_create_box_material(chassis_color: str = 'WHITE') -> bpy.types.Material:
-    """Create or retrieve a single lightweight shared material for the projector bounding box."""
+    """Create or retrieve a single lightweight shared material for the bounding box view."""
     mat_name = f"Projector_Box_{chassis_color}"
     mat = bpy.data.materials.get(mat_name)
     if mat is None:
@@ -31,10 +38,10 @@ def get_or_create_box_material(chassis_color: str = 'WHITE') -> bpy.types.Materi
         bsdf.inputs['Base Color'].default_value = rgb
         bsdf.inputs['Roughness'].default_value = 0.4
         if 'Alpha' in bsdf.inputs:
-            bsdf.inputs['Alpha'].default_value = 0.25
+            bsdf.inputs['Alpha'].default_value = 0.22
         if hasattr(mat, 'blend_method'):
             mat.blend_method = 'BLEND'
-        mat.diffuse_color = (rgb[0], rgb[1], rgb[2], 0.25)
+        mat.diffuse_color = (rgb[0], rgb[1], rgb[2], 0.22)
         links.new(bsdf.outputs['BSDF'], out_node.inputs['Surface'])
     return mat
 
@@ -50,8 +57,8 @@ def compute_chassis_bounds(
     inverted: bool,
 ) -> Dict[str, float]:
     """
-    Compute the exact bounding box coordinates in local projector space where
-    local (0, 0, 0) is the physical FOV origin inside the chassis.
+    Compute the exact chassis bounding box coordinates in the internal FOV-origin frame
+    where (0, 0, 0) is the physical optical FOV origin inside the chassis.
     """
     d_fov_z = max(0.008, min(float(fov_origin_depth), float(depth) - 0.008))
     z_front = -d_fov_z
@@ -78,8 +85,8 @@ def compute_chassis_bounds(
         y_c = -clamped_off_y
         y_min = y_c - height / 2.0
         y_max = y_c + height / 2.0
-        y_mount = y_min
-        dir_y = -1.0
+        y_mount = y_max if mount_type in {'CEILING', 'TRUSS'} else y_min
+        dir_y = 1.0 if mount_type in {'CEILING', 'TRUSS'} else -1.0
 
     return {
         "x_c": x_c,
@@ -98,6 +105,82 @@ def compute_chassis_bounds(
     }
 
 
+def compute_mount_box_and_attachment(
+    width: float,
+    height: float,
+    depth: float,
+    lens_offset_x: float,
+    lens_offset_y: float,
+    fov_origin_depth: float,
+    mount_type: str,
+    mount_pole_length: float,
+    inverted: bool,
+) -> Tuple[Dict[str, float], Vector]:
+    """
+    Compute the simple bounding box of the mounting system and the exact attachment point
+    at the END of the mounting system (relative to the internal FOV origin).
+    """
+    b = compute_chassis_bounds(
+        width, height, depth, lens_offset_x, lens_offset_y,
+        fov_origin_depth, mount_type, inverted
+    )
+    x_c, z_c = b["x_c"], b["z_c"]
+
+    if mount_type == 'CEILING':
+        y_start = b["y_max"]
+        pole_len = max(0.05, float(mount_pole_length))
+        y_end = y_start + pole_len
+        w_m = min(0.08, max(0.04, width * 0.22))
+        d_m = min(0.08, max(0.04, depth * 0.22))
+        mount_bounds = {
+            "x_min": x_c - w_m / 2.0,
+            "x_max": x_c + w_m / 2.0,
+            "y_min": min(y_start, y_end),
+            "y_max": max(y_start, y_end),
+            "z_min": z_c - d_m / 2.0,
+            "z_max": z_c + d_m / 2.0,
+        }
+        p_attach = Vector((x_c, y_end, z_c))
+        return mount_bounds, p_attach
+
+    elif mount_type == 'TRUSS':
+        y_start = b["y_max"]
+        truss_h = 0.10
+        y_end = y_start + truss_h
+        w_m = min(0.11, max(0.05, width * 0.28))
+        d_m = min(0.11, max(0.05, depth * 0.28))
+        mount_bounds = {
+            "x_min": x_c - w_m / 2.0,
+            "x_max": x_c + w_m / 2.0,
+            "y_min": min(y_start, y_end),
+            "y_max": max(y_start, y_end),
+            "z_min": z_c - d_m / 2.0,
+            "z_max": z_c + d_m / 2.0,
+        }
+        p_attach = Vector((x_c, y_end, z_c))
+        return mount_bounds, p_attach
+
+    elif mount_type == 'TABLETOP':
+        y_start = b["y_min"]
+        base_h = 0.025
+        y_end = y_start - base_h
+        w_m = width * 0.65
+        d_m = depth * 0.65
+        mount_bounds = {
+            "x_min": x_c - w_m / 2.0,
+            "x_max": x_c + w_m / 2.0,
+            "y_min": min(y_start, y_end),
+            "y_max": max(y_start, y_end),
+            "z_min": z_c - d_m / 2.0,
+            "z_max": z_c + d_m / 2.0,
+        }
+        p_attach = Vector((x_c, y_end, z_c))
+        return mount_bounds, p_attach
+
+    # NONE
+    return {}, Vector((0.0, 0.0, 0.0))
+
+
 def compute_installation_centroid(
     width: float,
     height: float,
@@ -110,24 +193,111 @@ def compute_installation_centroid(
     inverted: bool,
 ) -> Vector:
     """
-    Evaluate the exact 3D centroid of the selected installation support point in local coordinates.
+    Return the attachment point at the end of the mounting system relative to the internal FOV origin.
+    """
+    _, p_attach = compute_mount_box_and_attachment(
+        width, height, depth, lens_offset_x, lens_offset_y,
+        fov_origin_depth, mount_type, mount_pole_length, inverted
+    )
+    return p_attach
+
+
+def _box_verts_and_faces(
+    x_min: float, x_max: float,
+    y_min: float, y_max: float,
+    z_min: float, z_max: float,
+    offset: Vector,
+    vert_offset: int = 0,
+) -> Tuple[List[Tuple[float, float, float]], List[Tuple[int, int, int, int]]]:
+    ox, oy, oz = offset.x, offset.y, offset.z
+    verts = [
+        (x_min + ox, y_min + oy, z_min + oz),  # 0
+        (x_max + ox, y_min + oy, z_min + oz),  # 1
+        (x_max + ox, y_max + oy, z_min + oz),  # 2
+        (x_min + ox, y_max + oy, z_min + oz),  # 3
+        (x_min + ox, y_min + oz if False else y_min + oy, z_max + oz),  # 4
+        (x_max + ox, y_min + oy, z_max + oz),  # 5
+        (x_max + ox, y_max + oy, z_max + oz),  # 6
+        (x_min + ox, y_max + oy, z_max + oz),  # 7
+    ]
+    faces = [
+        (vert_offset + 0, vert_offset + 3, vert_offset + 2, vert_offset + 1),  # Front (-Z)
+        (vert_offset + 4, vert_offset + 5, vert_offset + 6, vert_offset + 7),  # Back (+Z)
+        (vert_offset + 0, vert_offset + 1, vert_offset + 5, vert_offset + 4),  # Bottom (-Y)
+        (vert_offset + 2, vert_offset + 3, vert_offset + 7, vert_offset + 6),  # Top (+Y)
+        (vert_offset + 0, vert_offset + 4, vert_offset + 7, vert_offset + 3),  # Left (-X)
+        (vert_offset + 1, vert_offset + 2, vert_offset + 6, vert_offset + 5),  # Right (+X)
+    ]
+    return verts, faces
+
+
+def generate_projector_bounding_boxes_data(
+    width: float = 0.3805,
+    height: float = 0.1217,
+    depth: float = 0.2770,
+    lens_offset_x: float = 0.0659,
+    lens_offset_y: float = 0.0150,
+    fov_origin_depth: float = 0.0510,
+    mount_type: str = 'CEILING',
+    mount_pole_length: float = 0.40,
+    inverted: bool = True,
+    pivot_at_installation: bool = True,
+) -> Dict[str, object]:
+    """
+    Generate pure-Python vertex and quad face lists for the simple bounding box view
+    of the projector chassis and the mounting system.
+
+    When mount_type != 'NONE' and pivot_at_installation is True:
+      - Local (0, 0, 0) is placed at the END of the mounting system in the attachment point.
+      - fov_origin_local = -p_attach_rel_fov is the internal FOV origin inside the chassis box.
+    Otherwise:
+      - Local (0, 0, 0) is at the internal FOV origin inside the chassis box.
     """
     b = compute_chassis_bounds(
         width, height, depth, lens_offset_x, lens_offset_y,
         fov_origin_depth, mount_type, inverted
     )
-    x_c, z_c, y_mount, dir_y = b["x_c"], b["z_c"], b["y_mount"], b["dir_y"]
+    mount_bounds, p_attach_rel_fov = compute_mount_box_and_attachment(
+        width, height, depth, lens_offset_x, lens_offset_y,
+        b["d_fov_z"], mount_type, mount_pole_length, inverted
+    )
 
-    if mount_type == 'NONE':
-        return Vector((0.0, 0.0, 0.0))
-    elif mount_type == 'TABLETOP':
-        return Vector((x_c, b["y_min"] - 0.025, z_c))
-    elif mount_type == 'CEILING':
-        return Vector((x_c, y_mount + dir_y * float(mount_pole_length), z_c))
-    elif mount_type == 'TRUSS':
-        return Vector((x_c, y_mount + dir_y * 0.085, z_c))
+    use_attachment_origin = (mount_type != 'NONE') and bool(pivot_at_installation)
+    if use_attachment_origin:
+        shift = -p_attach_rel_fov
+        fov_origin_local = Vector(shift)
+        attachment_point_local = Vector((0.0, 0.0, 0.0))
+    else:
+        shift = Vector((0.0, 0.0, 0.0))
+        fov_origin_local = Vector((0.0, 0.0, 0.0))
+        attachment_point_local = Vector(p_attach_rel_fov)
 
-    return Vector((0.0, 0.0, 0.0))
+    verts, faces = _box_verts_and_faces(
+        b["x_min"], b["x_max"],
+        b["y_min"], b["y_max"],
+        b["z_front"], b["z_rear"],
+        offset=shift,
+        vert_offset=0,
+    )
+
+    if mount_type in {'CEILING', 'TRUSS', 'TABLETOP'} and mount_bounds:
+        m_verts, m_faces = _box_verts_and_faces(
+            mount_bounds["x_min"], mount_bounds["x_max"],
+            mount_bounds["y_min"], mount_bounds["y_max"],
+            mount_bounds["z_min"], mount_bounds["z_max"],
+            offset=shift,
+            vert_offset=len(verts),
+        )
+        verts.extend(m_verts)
+        faces.extend(m_faces)
+
+    return {
+        "verts": verts,
+        "faces": faces,
+        "fov_origin_local": fov_origin_local,
+        "attachment_point_local": attachment_point_local,
+        "p_attach_rel_fov": p_attach_rel_fov,
+    }
 
 
 def build_projector_mesh(
@@ -147,18 +317,18 @@ def build_projector_mesh(
     mount_pole_length: float = 0.40,
     chassis_color: str = 'WHITE',
     inverted: bool = True,
-) -> Vector:
+    pivot_at_installation: bool = True,
+) -> Dict[str, Vector]:
     """
-    Build ONLY the 8-vertex projector bounding box and a single line (wire edge)
-    signaling the mounting system and its installation centroid P_inst.
+    Build the simple bounding box mesh for the projector chassis (Box 1: 8 verts, 6 faces)
+    and the mounting system (Box 2: 8 verts, 6 faces when mounted).
+    Places local (0, 0, 0) at the end of the mounting system (attachment point) when a mount is selected.
     """
     mat = get_or_create_box_material(chassis_color)
     mesh_obj.data.materials.clear()
     mesh_obj.data.materials.append(mat)
 
-    bm = bmesh.new()
-
-    b = compute_chassis_bounds(
+    data = generate_projector_bounding_boxes_data(
         width=width,
         height=height,
         depth=depth,
@@ -166,67 +336,23 @@ def build_projector_mesh(
         lens_offset_y=lens_offset_y,
         fov_origin_depth=fov_origin_depth,
         mount_type=mount_type,
-        inverted=inverted,
-    )
-
-    # 1. Strictly the 8-vertex, 6-face Bounding Box of the projector chassis
-    x_min, x_max = b["x_min"], b["x_max"]
-    y_min, y_max = b["y_min"], b["y_max"]
-    z_min, z_max = b["z_front"], b["z_rear"]
-
-    verts = [
-        bm.verts.new((x_min, y_min, z_min)),  # 0
-        bm.verts.new((x_max, y_min, z_min)),  # 1
-        bm.verts.new((x_max, y_max, z_min)),  # 2
-        bm.verts.new((x_min, y_max, z_min)),  # 3
-        bm.verts.new((x_min, y_min, z_max)),  # 4
-        bm.verts.new((x_max, y_min, z_max)),  # 5
-        bm.verts.new((x_max, y_max, z_max)),  # 6
-        bm.verts.new((x_min, y_max, z_max)),  # 7
-    ]
-    face_indices = [
-        (0, 3, 2, 1),  # Front
-        (4, 5, 6, 7),  # Back
-        (0, 1, 5, 4),  # Bottom
-        (2, 3, 7, 6),  # Top
-        (0, 4, 7, 3),  # Left
-        (1, 2, 6, 5),  # Right
-    ]
-    for idxs in face_indices:
-        f = bm.faces.new([verts[i] for i in idxs])
-        f.material_index = 0
-
-    # 2. Only a wire line to signal the type of mounting system
-    p_inst = compute_installation_centroid(
-        width=width,
-        height=height,
-        depth=depth,
-        lens_offset_x=lens_offset_x,
-        lens_offset_y=lens_offset_y,
-        fov_origin_depth=b["d_fov_z"],
-        mount_type=mount_type,
         mount_pole_length=mount_pole_length,
         inverted=inverted,
+        pivot_at_installation=pivot_at_installation,
     )
 
-    x_c, z_c, y_mount = b["x_c"], b["z_c"], b["y_mount"]
-    if mount_type in {'CEILING', 'TABLETOP'}:
-        # Single vertical line from mounting surface center to installation centroid P_inst
-        v_start = bm.verts.new((x_c, y_mount, z_c))
-        v_end = bm.verts.new((p_inst.x, p_inst.y, p_inst.z))
-        bm.edges.new((v_start, v_end))
-    elif mount_type == 'TRUSS':
-        # Single vertical stem line to P_inst + horizontal truss axis line through P_inst
-        v_start = bm.verts.new((x_c, y_mount, z_c))
-        v_end = bm.verts.new((p_inst.x, p_inst.y, p_inst.z))
-        bm.edges.new((v_start, v_end))
-        half_span = width * 0.45
-        v_t1 = bm.verts.new((x_c - half_span, p_inst.y, z_c))
-        v_t2 = bm.verts.new((x_c + half_span, p_inst.y, z_c))
-        bm.edges.new((v_t1, v_t2))
+    bm = bmesh.new()
+    bm_verts = [bm.verts.new(co) for co in data["verts"]]
+    for f_idxs in data["faces"]:
+        f = bm.faces.new([bm_verts[i] for i in f_idxs])
+        f.material_index = 0
 
     bm.to_mesh(mesh_obj.data)
     bm.free()
     mesh_obj.data.update()
 
-    return p_inst
+    return {
+        "fov_origin_local": data["fov_origin_local"],
+        "attachment_point_local": data["attachment_point_local"],
+        "p_attach_rel_fov": data["p_attach_rel_fov"],
+    }
